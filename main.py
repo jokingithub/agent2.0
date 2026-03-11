@@ -6,6 +6,9 @@ if __name__ == "__main__":
     inputs = {
         "messages": [("user", "一般格式、金额12万，期限6个月，请计算报价。报价单路径：/Users/niejing/work/AI2.0/workspace/quotation.md")],
     }
+    # inputs = {
+    #     "messages": [("user", "1+1=几？")],
+    # }
     
     for output in app.stream(inputs, config={"recursion_limit": 50}):
         # 打印各阶段的输出
