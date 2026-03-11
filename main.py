@@ -1,8 +1,18 @@
 from app.graph.builder import create_graph
 
+try:
+    from langfuse.langchain import CallbackHandler
+except Exception:
+    CallbackHandler = None
+
 if __name__ == "__main__":
     app = create_graph()
     session_id = "aaa"
+    callbacks = []
+
+    # 可选：接入 Langfuse 观测（需安装 langfuse 并配置 LANGFUSE_* 环境变量）
+    if CallbackHandler is not None:
+        callbacks.append(CallbackHandler())
     
     inputs = {
         "session_id": session_id,
@@ -17,6 +27,7 @@ if __name__ == "__main__":
         config={
             "recursion_limit": 50,
             "configurable": {"thread_id": session_id},
+            "callbacks": callbacks,
         },
     ):
         # 打印各阶段的输出
