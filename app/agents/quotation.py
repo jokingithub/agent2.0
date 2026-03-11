@@ -19,7 +19,7 @@ _CALCULATE_TOOL = load_skill_as_tool(str(_ROOT / "app" / "skills" / "calculate_s
 _READ_FILE_TOOL = load_skill_as_tool(str(_ROOT / "app" / "skills" / "readFile_skill"))
 
 def quotation_node(state):
-    llm = get_model()
+    llm = get_model(model_choice="high")
     agent = create_agent_node(
         llm,
         [_CALCULATE_TOOL, _READ_FILE_TOOL],

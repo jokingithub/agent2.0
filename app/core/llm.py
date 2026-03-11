@@ -19,13 +19,17 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
-def get_model():
+def get_model(model_choice: str = "high") -> ChatOpenAI:
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError("未读取到 OPENAI_API_KEY，请在环境变量或 .env 文件中配置。")
-
+    model = {
+        "high": "google/gemini-3-flash-preview",
+        "medium": "google/gemini-2.5-pro-preview",
+        "low": "google/gemini-1.5-pro-preview",
+    }
     return ChatOpenAI(
-        model="google/gemini-3-flash-preview",
+        model=model.get(model_choice, "google/gemini-3-flash-preview"),
         temperature=0,
         api_key=api_key,
         base_url=os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1"),

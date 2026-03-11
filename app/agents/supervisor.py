@@ -1,21 +1,18 @@
-from typing import Literal
-
 from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage
 
 from app.core.llm import get_model
+from app.core.agents_config import AGENT_REGISTRY, ROUTABLE_NEXT
 
 
 class SupervisorDecision(BaseModel):
-    next: Literal["quotation", "FINISH"] = Field(
+    next: str = Field(
         description="下一步路由，必须是可用 subagent 名称或 FINISH"
     )
     reason: str = Field(default="", description="路由原因")
 
 def supervisor_node(state):
-    available_subagents = {
-        "quotation": "报价计算员：读取报价单并计算报价",
-    }
+    available_subagents = AGENT_REGISTRY
 
     system_prompt = (
         "你是团队主管。请根据对话进度，在可用 subagent 中选择下一步。"
@@ -35,7 +32,7 @@ def supervisor_node(state):
                     "session_id": state.get("session_id", "default"),
                 }
 
-    llm = get_model().with_structured_output(SupervisorDecision)
+    llm = get_model(model_choice="high").with_structured_output(SupervisorDecision)
     decision = llm.invoke(
         [
             (
@@ -43,14 +40,16 @@ def supervisor_node(state):
                 (
                     f"{system_prompt}\n"
                     f"可用 subagent: {available_subagents}\n"
-                    "只允许在 ['quotation', 'FINISH'] 中选择 next。"
+                    f"只允许在 {list(ROUTABLE_NEXT)} 中选择 next。"
                 ),
             ),
             *state.get("messages", []),
         ]
     )
 
+    next_node = decision.next if decision.next in ROUTABLE_NEXT else "FINISH"
+
     return {
-        "next": decision.next,
+        "next": next_node,
         "session_id": state.get("session_id", "default"),
     }
