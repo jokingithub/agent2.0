@@ -7,3 +7,5 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     # 记录下一个要执行的 Agent 名字
     next: str
+    # 当前会话 ID（用于隔离会话级资源）
+    session_id: str

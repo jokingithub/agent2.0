@@ -27,4 +27,7 @@ def quotation_node(state):
     )
     # 调用并返回结果
     response = agent.invoke(state)
-    return {"messages": [response]}
+    return {
+        "messages": [response],
+        "session_id": state.get("session_id", "default"),
+    }

@@ -2,15 +2,23 @@ from app.graph.builder import create_graph
 
 if __name__ == "__main__":
     app = create_graph()
+    session_id = "aaa"
     
     inputs = {
-        "messages": [("user", "一般格式、金额12万，期限6个月，请计算报价。报价单路径：/Users/niejing/work/AI2.0/workspace/quotation.md")],
+        "session_id": session_id,
+        "messages": [("user", "一般格式、金额12万，期限6个月，请计算报价。报价单文件名：quotation.md")],
     }
     # inputs = {
     #     "messages": [("user", "1+1=几？")],
     # }
     
-    for output in app.stream(inputs, config={"recursion_limit": 50}):
+    for output in app.stream(
+        inputs,
+        config={
+            "recursion_limit": 50,
+            "configurable": {"thread_id": session_id},
+        },
+    ):
         # 打印各阶段的输出
         for key, value in output.items():
             print(f"Node '{key}' is active.")
