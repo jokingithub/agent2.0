@@ -38,11 +38,12 @@ def load_skill_as_tool(skill_dir: str) -> Tool:
     目录要求:
     - skill.md (含 front matter)
 
-    front matter 示例:
+        front matter 示例:
     ---
     name: calculate
     description: 计算数学表达式
-    entrypoint: app.skills.calculate_skill.calculate_skill:calculate
+        metadata:
+            entrypoint: app.skills.calculate_skill.calculate:calculate
     ---
     """
     skill_md = Path(skill_dir) / "skill.md"
@@ -54,12 +55,13 @@ def load_skill_as_tool(skill_dir: str) -> Tool:
 
     name = metadata.get("name")
     description = metadata.get("description", "")
-    entrypoint = metadata.get("entrypoint")
+    custom_meta = metadata.get("metadata") or {}
+    entrypoint = metadata.get("entrypoint") or custom_meta.get("entrypoint")
 
     if not name:
         raise ValueError("skill.md 缺少必填字段: name")
     if not entrypoint:
-        raise ValueError("skill.md 缺少必填字段: entrypoint")
+        raise ValueError("skill.md 缺少必填字段: metadata.entrypoint（或 entrypoint）")
 
     loaded = _load_callable(entrypoint)
 
