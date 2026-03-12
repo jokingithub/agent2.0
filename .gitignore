@@ -38,3 +38,7 @@ htmlcov/
 
 # Secrets
 .env
+
+sessions/
+
+test_data/
