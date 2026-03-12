@@ -7,7 +7,7 @@ except Exception:
 
 if __name__ == "__main__":
     app = create_graph()
-    session_id = "aaa"
+    session_id = "123"
     callbacks = []
 
     # 可选：接入 Langfuse 观测（需安装 langfuse 并配置 LANGFUSE_* 环境变量）
@@ -16,7 +16,7 @@ if __name__ == "__main__":
     
     inputs = {
         "session_id": session_id,
-        "messages": [("user", "一般格式、金额12万，期限6个月，请计算报价。报价单文件名：quotation.md")],
+        "messages": [("user", "审核保函格式，保函文件：bh.md")],
     }
     # inputs = {
     #     "messages": [("user", "1+1=几？")],
