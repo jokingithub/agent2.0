@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 MAX_SIDE_LIMIT = 2000
-DEFAULT_DPI = 200  # 提高 DPI 以保证识别率
+DEFAULT_DPI = 100  # 提高 DPI 以保证识别率
 SUPPORTED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
 
 # --- 全局变量（仅在子进程中生效） ---
@@ -27,7 +27,7 @@ def get_ocr_instance(mode: str = "PP_OCRv5"):
     global _ocr_instance
     if _ocr_instance is None:
         try:
-            from paddle_OCR import paddle_OCR # 延迟加载
+            from OCR.paddle_OCR import paddle_OCR # 延迟加载
             _ocr_instance = paddle_OCR(mode=mode)
         except ImportError:
             logger.error("❌ 无法导入 paddle_OCR 模块")
@@ -65,7 +65,7 @@ def process_batch_mp(args: Tuple[List[Any], List[Image.Image], str]) -> Optional
         processed_results = []
         for label, res in zip(batch_labels, results):
             res_dict = dict(res)
-            res_dict["source_label"] = label
+            res_dict["page_index"] = label
             processed_results.append(res_dict)
         
         logger.info(f"✅ Batch {batch_labels} processed in {time.time() - page_start:.2f}s")
@@ -92,7 +92,7 @@ def pdf_batch_generator(file_path: str, batch_size: int) -> Generator:
                 last_page=last_page,
                 thread_count=4
             )
-            labels = [f"page_{j}" for j in range(first_page, last_page + 1)]
+            labels = [ j for j in range(first_page, last_page + 1)]
             yield (labels, images, None)
     except Exception as e:
         logger.error(f"Failed to process PDF {file_path}: {e}")
@@ -175,7 +175,7 @@ def ocr_pipeline(input_path: str, workers: int = 1, batch_size: int = 4) -> List
 
 if __name__ == "__main__":
     # 使用建议：如果是 CPU 建议 workers = CPU核心数/2；如果是 GPU，通常 workers=1
-    TARGET_PATH = "./test_data/1.png"
+    TARGET_PATH = "../test_data/1.png"
     
     if os.path.exists(TARGET_PATH):
         final_data = ocr_pipeline(
@@ -183,6 +183,6 @@ if __name__ == "__main__":
             workers=1,
             batch_size=4
         )
-        # print(final_data)
+        print(final_data)
     else:
         logger.error("Please provide a valid path.")
