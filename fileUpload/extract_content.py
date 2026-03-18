@@ -1,101 +1,76 @@
-import os,io
+import os
+import requests
 import mammoth
-import pymupdf4llm
-import pdfplumber
+import logging
 from charset_normalizer import from_path
-from PIL import Image
-# import pytesseract
-from pdf2image import convert_from_path
-from .baidu_ocr import BaiduOCR
+from logger import logger
 
-# --- 配置区 ---
-API_KEY = "GoBHYVgg4c1SMhcf0xYYqcWk"
-SECRET_KEY = "lMC1VfOUx7XenpsIzLB6zZbB4YVn40FU"
-# --------------
+# 配置
+OCR_SERVICE_URL = "http://127.0.0.1:8001"
 
-ocr_client = BaiduOCR(API_KEY, SECRET_KEY)
+def _format_ocr_to_markdown(ocr_results):
+    """关键步骤：将 OCR 返回的数组拼接为可读文本"""
+    if not ocr_results:
+        return "[OCR 未识别到文字内容]"
+    
+    formatted_pages = []
+    for page in ocr_results:
+        idx = page.get("page_index", "?")
+        # 提取 rec_texts 数组
+        lines = page.get("rec_texts", [])
+        # 过滤空行并拼接
+        clean_text = "\n".join([line.strip() for line in lines if line.strip()])
+        
+        # 格式化输出
+        formatted_pages.append(f"### 第 {idx} 页\n\n{clean_text}")
+    
+    return "\n\n---\n\n".join(formatted_pages)
+
+def _call_ocr_api(file_path):
+    """请求远程 OCR 服务"""
+    try:
+        resp = requests.post(
+            f"{OCR_SERVICE_URL}/ocr/process",
+            json={"file_path": os.path.abspath(file_path), "batch_size": 4},
+            timeout=300
+        )
+        if resp.status_code == 200 and resp.json().get("success"):
+            return resp.json().get("data")
+        return None
+    except Exception as e:
+        logger.error(f"OCR API Error: {e}")
+        return None
 
 def extract_content(file_path):
-    """
-    根据文件后缀名提取内容，并尽可能转换为 Markdown 格式
-    """
-    if not os.path.exists(file_path):
-        return f"文件不存在: {file_path}"
-        
+    """主入口"""
     ext = os.path.splitext(file_path)[1].lower()
-    
-    if ext == '.docx':
-        return _extract_docx_to_markdown(file_path)
-    elif ext == '.pdf':
-        return _extract_pdf_to_markdown(file_path)
-    elif ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']:
-        return _extract_image(file_path)
-    elif ext in ['.txt', '.md', '.py', '.js', '.json']:
-        return _extract_txt_to_markdown(file_path)
-    else:
-        return f"不支持的文件类型: {ext}"
-
-def _extract_docx_to_markdown(path):
-    """docx 转 Markdown"""
     try:
-        with open(path, "rb") as docx_file:
-            # mammoth 能够识别表格、标题、列表
-            result = mammoth.convert_to_markdown(docx_file)
-            return result.value
-    except Exception as e:
-        return f"docx 转换失败: {str(e)}"
-
-def _extract_pdf_to_markdown(path):
-    """PDF 提取：文字版直接转，图片版调用 OCR"""
-    try:
-        # 1. 尝试提取文字版 Markdown
-        # md_text = pymupdf4llm.to_markdown(path)
-        md_text = ""
-        
-        # 2. 如果字数太少，说明是扫描件，启动 OCR
-        if len(md_text.strip()) < 20:
-            print(f"检测到扫描版 PDF: {path}，正在执行 OCR...")
-            full_ocr_text = []
-            # 将 PDF 页面转为图片
-            images = convert_from_path(path)
-            for i, image in enumerate(images):
-                # 将 PIL Image 对象转为 bytes
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format='JPEG')
-                image_bytes = img_byte_arr.getvalue()
+        if ext == '.docx':
+            with open(file_path, "rb") as f:
+                return mammoth.convert_to_markdown(f).value
                 
-                # 调用百度 OCR
-                page_text = ocr_client.recognize(image_bytes)
-                full_ocr_text.append(f"### Page {i+1}\n{page_text}")
+        elif ext == '.pdf':
+            # 这里演示直接进入 OCR 逻辑（针对扫描件）
+            logger.info(f"正在识别 PDF: {file_path}...")
+            results = _call_ocr_api(file_path)
+            return _format_ocr_to_markdown(results)
             
-            return "\n\n".join(full_ocr_text)
-        
-        return md_text
+        elif ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+            logger.info(f"正在识别图片: {file_path}...")
+            results = _call_ocr_api(file_path)
+            return _format_ocr_to_markdown(results)
+            
+        elif ext in ['.txt', '.md']:
+            res = from_path(file_path).best()
+            return str(res) if res else "读取失败"
     except Exception as e:
-        return f"PDF 处理出错: {e}"
+        logger.error(f"提取内容失败: {e}")
+        return f"提取内容失败: {str(e)}"
 
-def _extract_txt_to_markdown(path):
-    """
-    文本文件读取：自动检测编码并清洗格式。
-    在 Markdown 语境下，通常保持原样即可。
-    """
-    try:
-        # 使用 charset-normalizer 自动检测并读取编码（解决 utf-8/gbk 冲突）
-        results = from_path(path)
-        best_guess = results.best()
-        
-        if best_guess:
-            content = str(best_guess)
-            # 基础清洗：移除行尾空格，确保 Markdown 渲染整齐
-            lines = [line.rstrip() for line in content.splitlines()]
-            return "\n".join(lines)
-        else:
-            return "无法识别该文本文件的编码格式。"
-    except Exception as e:
-        return f"TXT 读取失败: {str(e)}"
-
-def _extract_image(path):
-    """图片 OCR 占位逻辑"""
-    # 以后开启 OCR 可以使用: 
-    # return pytesseract.image_to_string(Image.open(path), lang='chi_sim+eng')
-    return f"--- 图片内容: {os.path.basename(path)} (OCR 尚未启用) ---"
+if __name__ == "__main__":
+    # 测试
+    test_file = "test.pdf" 
+    if os.path.exists(test_file):
+        md_result = extract_content(test_file)
+        print("\n--- 提取结果 ---\n")
+        print(md_result)

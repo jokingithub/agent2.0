@@ -1,11 +1,19 @@
 from typing import Any
 import json
+import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
 from app.graph.builder import create_graph
+from app.Schema import ChatRequest, ChatResponse, UploadResponse
+from fileUpload.extract_content import extract_content
+from fileUpload.file_classfly import classify_file
+from fileUpload.fileUpload import save_file
+from dataBase.Schema import FileModel
+from dataBase.Service import FileService
+from logger import logger
+
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -15,23 +23,35 @@ except Exception:
 
 app = FastAPI(title="AI2.0 API", version="1.0.0")
 graph = create_graph()
-
-
-class ChatRequest(BaseModel):
-    session_id: str = Field(..., description="会话 ID")
-    message: str = Field(..., description="用户输入")
-    recursion_limit: int = Field(50, ge=1, le=200)
-
-
-class ChatResponse(BaseModel):
-    session_id: str
-    final_message: str
-    events: list[dict[str, Any]]
-
+file_service = FileService()
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/upload", response_model=UploadResponse)
+async def upload_file(
+    session_id: str = Form(..., description="会话 ID"),
+    file: UploadFile = File(..., description="上传的文件")
+) -> UploadResponse:
+    """
+    上传文件并提取内容。
+    支持的文件类型：PDF、DOCX、图片（JPG/PNG等）、文本文件
+    """
+    try:
+        result = await save_file(file, session_id)
+        return UploadResponse(**result)
+    except Exception as e:
+        logger.error(f"文件处理失败: {str(e)}", exc_info=False)
+        return UploadResponse(
+            session_id=session_id,
+            file_name=file.filename,
+            file_id="",
+            file_type=[],
+            content_preview="",
+            message=f"文件处理失败: {str(e)}"
+        )
 
 
 @app.post("/chat", response_model=ChatResponse)

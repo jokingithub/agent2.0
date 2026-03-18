@@ -1,0 +1,36 @@
+services:
+  ocr-service:
+    build: ./ocr-service
+    container_name: ocr-service
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./OCR:/app/OCR:ro  # 挂载OCR模块（只读）
+      - /tmp/ocr_uploads:/tmp/ocr_uploads  # 临时文件存储
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 可选：主应用服务
+  main-app:
+    build: .
+    container_name: main-app
+    ports:
+      - "8000:8000"
+    environment:
+      - OCR_SERVICE_URL=http://ocr-service:8001
+      - USE_OCR_SERVICE=true
+    depends_on:
+      ocr-service:
+        condition: service_healthy
+    volumes:
+      - ./sessions:/app/sessions
+      - ./fileUpload:/app/fileUpload
+      - ./uploads:/app/uploads
+    restart: unless-stopped
