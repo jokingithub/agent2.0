@@ -1,15 +1,19 @@
 from typing import Any
 import json
 import os
-import tempfile
-from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
 from app.graph.builder import create_graph
+from app.Schema import ChatRequest, ChatResponse, UploadResponse
 from fileUpload.extract_content import extract_content
+from fileUpload.file_classfly import classify_file
+from fileUpload.fileUpload import save_file
+from dataBase.Schema import FileModel
+from dataBase.Service import FileService
+from logger import logger
+
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -19,27 +23,7 @@ except Exception:
 
 app = FastAPI(title="AI2.0 API", version="1.0.0")
 graph = create_graph()
-
-
-class ChatRequest(BaseModel):
-    session_id: str = Field(..., description="会话 ID")
-    message: str = Field(..., description="用户输入")
-    recursion_limit: int = Field(50, ge=1, le=200)
-
-
-class ChatResponse(BaseModel):
-    session_id: str
-    final_message: str
-    events: list[dict[str, Any]]
-
-
-class UploadResponse(BaseModel):
-    session_id: str
-    file_name: str
-    saved_path: str
-    content_preview: str
-    message: str = "文件上传和提取成功"
-
+file_service = FileService()
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -56,48 +40,15 @@ async def upload_file(
     支持的文件类型：PDF、DOCX、图片（JPG/PNG等）、文本文件
     """
     try:
-        # 1. 确保 session 目录存在
-        session_dir = Path(f"./sessions/{session_id}")
-        session_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 2. 使用临时文件处理上传的文件
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
-            content = await file.read()
-            tmp_file.write(content)
-            tmp_path = tmp_file.name
-        
-        try:
-            # 3. 提取文件内容
-            extracted_content = extract_content(tmp_path)
-            
-            # 4. 生成输出文件名并保存
-            file_stem = Path(file.filename).stem  # 获取文件名（不含扩展名）
-            output_file = session_dir / f"{file_stem}.md"
-            
-            with open(output_file, "w", encoding="utf-8") as f:
-                f.write(extracted_content)
-            
-            # 5. 生成预览内容（前 500 字符）
-            preview = extracted_content[:500] + ("..." if len(extracted_content) > 500 else "")
-            
-            return UploadResponse(
-                session_id=session_id,
-                file_name=file.filename,
-                saved_path=str(output_file),
-                content_preview=preview,
-                message="文件上传和提取成功"
-            )
-        
-        finally:
-            # 清理临时文件
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-    
+        result = await save_file(file, session_id)
+        return UploadResponse(**result)
     except Exception as e:
+        logger.error(f"文件处理失败: {str(e)}", exc_info=False)
         return UploadResponse(
             session_id=session_id,
             file_name=file.filename,
-            saved_path="",
+            file_id="",
+            file_type=[],
             content_preview="",
             message=f"文件处理失败: {str(e)}"
         )

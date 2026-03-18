@@ -3,10 +3,10 @@ import requests
 import mammoth
 import logging
 from charset_normalizer import from_path
+from logger import logger
 
 # 配置
 OCR_SERVICE_URL = "http://127.0.0.1:8001"
-logger = logging.getLogger(__name__)
 
 def _format_ocr_to_markdown(ocr_results):
     """关键步骤：将 OCR 返回的数组拼接为可读文本"""
@@ -44,27 +44,28 @@ def _call_ocr_api(file_path):
 def extract_content(file_path):
     """主入口"""
     ext = os.path.splitext(file_path)[1].lower()
-    
-    if ext == '.docx':
-        with open(file_path, "rb") as f:
-            return mammoth.convert_to_markdown(f).value
+    try:
+        if ext == '.docx':
+            with open(file_path, "rb") as f:
+                return mammoth.convert_to_markdown(f).value
+                
+        elif ext == '.pdf':
+            # 这里演示直接进入 OCR 逻辑（针对扫描件）
+            logger.info(f"正在识别 PDF: {file_path}...")
+            results = _call_ocr_api(file_path)
+            return _format_ocr_to_markdown(results)
             
-    elif ext == '.pdf':
-        # 这里演示直接进入 OCR 逻辑（针对扫描件）
-        print(f"正在识别 PDF: {file_path}...")
-        results = _call_ocr_api(file_path)
-        return _format_ocr_to_markdown(results)
-        
-    elif ext in ['.jpg', '.jpeg', '.png', '.bmp']:
-        print(f"正在识别图片: {file_path}...")
-        results = _call_ocr_api(file_path)
-        return _format_ocr_to_markdown(results)
-        
-    elif ext in ['.txt', '.md']:
-        res = from_path(file_path).best()
-        return str(res) if res else "读取失败"
-        
-    return "不支持的格式"
+        elif ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+            logger.info(f"正在识别图片: {file_path}...")
+            results = _call_ocr_api(file_path)
+            return _format_ocr_to_markdown(results)
+            
+        elif ext in ['.txt', '.md']:
+            res = from_path(file_path).best()
+            return str(res) if res else "读取失败"
+    except Exception as e:
+        logger.error(f"提取内容失败: {e}")
+        return f"提取内容失败: {str(e)}"
 
 if __name__ == "__main__":
     # 测试
