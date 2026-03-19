@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/tools/factory.py
+# time: 2026/3/9
+
 import importlib
 from pathlib import Path
 

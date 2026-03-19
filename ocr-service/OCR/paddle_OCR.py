@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：ocr-service/OCR/paddle_OCR.py
+# time: 2026/3/17
+
 from paddleocr import PaddleOCR, PPStructureV3
 
 class paddle_OCR():

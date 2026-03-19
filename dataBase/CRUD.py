@@ -1,4 +1,6 @@
-# dataBase/CRUD.py
+# -*- coding: utf-8 -*-
+# 文件：dataBase/CRUD.py
+# time: 2026/3/19
 
 from .database import Database
 from bson import ObjectId

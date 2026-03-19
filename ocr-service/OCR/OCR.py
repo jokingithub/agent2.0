@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：ocr-service/OCR/OCR.py
+# time: 2026/3/17
+
 import os
 import time
 import logging

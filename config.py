@@ -1,4 +1,7 @@
-# config.py
+# -*- coding: utf-8 -*-
+# 文件：config.py
+# time: 2026/3/19
+
 import os
 from dotenv import load_dotenv
 

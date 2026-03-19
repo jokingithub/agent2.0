@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/agents/supervisor.py
+# time: 2026/3/9
+
 from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage, HumanMessage
 

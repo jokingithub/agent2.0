@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：fileUpload/file_classfly.py
+# time: 2026/3/19
+
 import re # 导入正则，用于更灵活的分隔
 from app.core.llm import get_model
 from logger import logger

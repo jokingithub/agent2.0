@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/graph/builder.py
+# time: 2026/3/9
+
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import AIMessage

@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/core/state.py
+# time: 2026/3/9
+
 from typing import Annotated, Sequence, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages

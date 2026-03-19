@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/Schema.py
+# time: 2026/3/10
+
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional,Any
 

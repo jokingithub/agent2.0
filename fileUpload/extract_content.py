@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：fileUpload/extract_content.py
+# time: 2026/3/18
+
 import os
 import requests
 import mammoth

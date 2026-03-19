@@ -1,4 +1,7 @@
-# dataBase/database.py
+# -*- coding: utf-8 -*-
+# 文件：dataBase/database.py
+# time: 2026/3/19
+
 from pymongo import MongoClient
 from logger import logger
 # 如果 config.py 在根目录

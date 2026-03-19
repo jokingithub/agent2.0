@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：fileUpload/fileUpload.py
+# time: 2026/3/18
+
 import hashlib
 import os
 from typing import Any

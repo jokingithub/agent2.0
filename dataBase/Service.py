@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：dataBase/Service.py
+# time: 2026/3/19
+
 from .database import Database
 from .CRUD import CRUD
 from .Schema import FileModel, MemoryModel, FileTypeModel
@@ -44,7 +48,7 @@ class MemoryService:
     
 class FileTypeService:
     def __init__(self):
-        self.crud = CRUD(Database.db)
+        self.crud = CRUD(Database.get_db())
         self.collection = "file_types" # 建议专门存配置的集合
 
     def update_file_types(self, model: FileTypeModel):
@@ -60,5 +64,5 @@ class FileTypeService:
         # 查找那条全局配置
         doc = self.crud.db[self.collection].find_one({"_id": "global_types"})
         if doc and "file_type" in doc:
-            return doc["file_type"] # 返回 ["合同", "发票", ...]
-        return [] # 如果没数据，返回空列表
+            return doc["file_type"]
+        return []

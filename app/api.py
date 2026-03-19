@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/api.py
+# time: 2026/3/10
+
 from typing import Any
 import json
 import os
@@ -7,11 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse
-from fileUpload.extract_content import extract_content
-from fileUpload.file_classfly import classify_file
 from fileUpload.fileUpload import save_file
-from dataBase.Schema import FileModel
-from dataBase.Service import FileService
 from logger import logger
 
 
@@ -20,10 +20,8 @@ try:
 except Exception:
     CallbackHandler = None
 
-
 app = FastAPI(title="AI2.0 API", version="1.0.0")
 graph = create_graph()
-file_service = FileService()
 
 @app.get("/health")
 def health() -> dict[str, str]:

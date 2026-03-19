@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/agents/reviewer.py
+# time: 2026/3/9
+
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pathlib import Path
 from app.core.llm import get_model

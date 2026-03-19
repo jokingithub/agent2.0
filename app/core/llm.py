@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：app/core/llm.py
+# time: 2026/3/9
+
 from langchain_openai import ChatOpenAI
 import os
 from pathlib import Path

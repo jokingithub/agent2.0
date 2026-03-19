@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 文件：ocr-service/main.py
+# time: 2026/3/18
+
 import sys
 import os
 import multiprocessing
