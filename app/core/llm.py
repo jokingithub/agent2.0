@@ -16,6 +16,7 @@ def get_model(model_choice: str = "high") -> ChatOpenAI:
         "high": "google/gemini-3-flash-preview",
         "medium": "google/gemini-2.5-pro-preview",
         "low": "google/gemini-1.5-pro-preview",
+        "test":"qwen3.5-35b-a3b"
     }
     return ChatOpenAI(
         model=model.get(model_choice, "google/gemini-3-flash-preview"),

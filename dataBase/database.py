@@ -1,41 +1,50 @@
 # -*- coding: utf-8 -*-
-# 文件：dataBase/database.py
-# time: 2026/3/19
-
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING, DESCENDING
 from logger import logger
-# 如果 config.py 在根目录
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 
 class Database:
-    client = None
-    db = None
+    _client = None
+    _db = None
 
     @classmethod
-    def connect(cls, uri=None, db_name=None):
-        # 如果没传参，默认从 Config 拿
-        uri = uri or Config.MONGO_URI
-        db_name = db_name or Config.MONGO_DB_NAME
-        
+    def connect(cls):
+        if cls._client is None:
+            try:
+                cls._client = MongoClient(Config.MONGO_URI, serverSelectionTimeoutMS=5000)
+                cls._client.admin.command('ping')
+                cls._db = cls._client[Config.MONGO_DB_NAME]
+                
+                cls._init_indices()
+                
+                logger.info(f"Connected to MongoDB and indices initialized.")
+            except Exception as e:
+                logger.error(f"MongoDB Connection Error: {e}")
+                raise e
+
+    @classmethod
+    def _init_indices(cls):
+        """初始化各个集合的索引"""
         try:
-            # 增加连接超时设置，防止程序卡死
-            cls.client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+            # 1. 为 files 集合的 file_id 建立唯一索引
+            cls._db["files"].create_index([("file_id", ASCENDING)], unique=True)
+
+            # 2. 为 sessions 集合的 session_id 建立唯一索引
+            cls._db["sessions"].create_index([("session_id", ASCENDING)], unique=True)
+
+            # 3. 为 memories 集合建立复合索引
+            # 因为你经常根据 session_id 查询并按 timestamp 排序，复合索引效率最高
+            cls._db["memories"].create_index([
+                ("session_id", ASCENDING), 
+                ("timestamp", DESCENDING)
+            ])
             
-            # 强制检查连接是否可用
-            cls.client.admin.command('ping') 
-            
-            cls.db = cls.client[db_name]
-            logger.info(f"Successfully connected to MongoDB: {db_name}",exc_info=True)
+            logger.info("MongoDB indices ensured.")
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}", exc_info=True)
-            raise e
+            logger.warning(f"Could not create indices: {e}")
 
     @classmethod
     def get_db(cls):
-        if cls.db is None:
-            # 自动尝试连接一次，或者抛出异常
+        if cls._db is None:
             cls.connect()
-        return cls.db
+        return cls._db
