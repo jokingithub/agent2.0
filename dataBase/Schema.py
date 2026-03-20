@@ -2,6 +2,7 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Any
 from datetime import datetime
+from fileUpload.Schema import Letter_Of_Guarantee_Format
 
 class FileModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
@@ -11,7 +12,7 @@ class FileModel(BaseModel):
     file_name: str
     file_type: List[str]
     content: str
-    main_info: Optional[dict] = None
+    main_info: Optional[Letter_Of_Guarantee_Format] = None
     upload_time: datetime = Field(default_factory=datetime.now)
 
 class MemoryModel(BaseModel):

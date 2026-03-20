@@ -16,6 +16,7 @@ from dataBase.Service import FileService, SessionService
 
 from fileUpload.file_classfly import classify_file
 from fileUpload.extract_content import extract_content
+from fileUpload.element_extraction import element_extraction
 from logger import logger
 
 async def save_file(file, session_id) -> dict[str, Any]:
@@ -47,13 +48,14 @@ async def save_file(file, session_id) -> dict[str, Any]:
             file_type = classify_file(extracted_content)
 
             # TODO: 增加要素抽取的逻辑
-
+            element = element_extraction(file_content=extracted_content,file_type=file_type)
+            logger.info(element)
             file_data = FileModel(
                 file_id=file_id,
                 file_name=file.filename,
                 file_type=file_type,
                 content=extracted_content,
-                main_info={},
+                main_info=element,
                 upload_time=datetime.now()
             )
             session_service.add_file_to_session(session_id=session_id,file_info=file_data)
