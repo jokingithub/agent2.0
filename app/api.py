@@ -13,7 +13,7 @@ from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse
 from fileUpload.fileUpload import save_file
 from logger import logger
-
+from app.config_api import router as config_router
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -21,6 +21,7 @@ except Exception:
     CallbackHandler = None
 
 app = FastAPI(title="AI2.0 API", version="1.0.0")
+app.include_router(config_router)
 graph = create_graph()
 
 @app.get("/health")

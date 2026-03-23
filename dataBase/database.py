@@ -1,50 +1,108 @@
 # -*- coding: utf-8 -*-
-from pymongo import MongoClient, ASCENDING, DESCENDING
+from sqlalchemy import create_engine, text, Column, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import sessionmaker, declarative_base
 from logger import logger
 from config import Config
 
+Base = declarative_base()
+
+class DocumentStore(Base):
+    """通用文档表，每个collection对应一张表"""
+    __abstract__ = True
+
+    id = Column(String, primary_key=True)
+    data = Column(JSONB, nullable=False)
+
 class Database:
-    _client = None
-    _db = None
+    _engine = None
+    _session_factory = None
+
+    # 需要的"集合"名，对应建表
+    COLLECTIONS = [
+          # 现有业务表
+          "files",
+          "sessions",
+          "memories",
+          "config",
+          # 配置表 - 系统配置
+          "model_connections",
+          "model_levels",
+          "gateway_env",
+          "gateway_apps",
+          "gateway_channels",
+          "tools",
+          "chat_logs",
+          # 配置表 - 业务配置
+          "roles",
+          "sub_agents",
+          "skills",
+          "file_processing",
+          "scenes",
+      ]
+
 
     @classmethod
     def connect(cls):
-        if cls._client is None:
+        if cls._engine is None:
             try:
-                cls._client = MongoClient(Config.MONGO_URI, serverSelectionTimeoutMS=5000)
-                cls._client.admin.command('ping')
-                cls._db = cls._client[Config.MONGO_DB_NAME]
-                
-                cls._init_indices()
-                
-                logger.info(f"Connected to MongoDB and indices initialized.")
+                cls._engine = create_engine(Config.PG_URI)
+                cls._session_factory = sessionmaker(bind=cls._engine)
+
+                # 测试连接
+                with cls._engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+
+                cls._init_tables()
+                logger.info("Connected to PostgreSQL and tables initialized.")
             except Exception as e:
-                logger.error(f"MongoDB Connection Error: {e}")
+                logger.error(f"PostgreSQL Connection Error: {e}")
                 raise e
 
     @classmethod
-    def _init_indices(cls):
-        """初始化各个集合的索引"""
+    def _init_tables(cls):
         try:
-            # 1. 为 files 集合的 file_id 建立唯一索引
-            cls._db["files"].create_index([("file_id", ASCENDING)], unique=True)
+            with cls._engine.connect() as conn:
+                for col in cls.COLLECTIONS:
+                    conn.execute(text(f"""
+                        CREATE TABLE IF NOT EXISTS {col} (
+                            id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid()::varchar,
+                            data JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                        )
+                    """))
 
-            # 2. 为 sessions 集合的 session_id 建立唯一索引
-            cls._db["sessions"].create_index([("session_id", ASCENDING)], unique=True)
+                # 现有业务表索引
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_files_file_id ON files ((data->>'file_id'));
+                    CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions ((data->>'session_id'));
+                    CREATE INDEX IF NOT EXISTS idx_memories_session_id ON memories ((data->>'session_id'));
+                    CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories ((data->>'timestamp'));
+                """))
 
-            # 3. 为 memories 集合建立复合索引
-            # 因为你经常根据 session_id 查询并按 timestamp 排序，复合索引效率最高
-            cls._db["memories"].create_index([
-                ("session_id", ASCENDING), 
-                ("timestamp", DESCENDING)
-            ])
-            
-            logger.info("MongoDB indices ensured.")
+                # 配置表索引
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_model_connections_protocol ON model_connections ((data->>'protocol'));
+                    CREATE INDEX IF NOT EXISTS idx_model_levels_level ON model_levels ((data->>'level'));
+                    CREATE INDEX IF NOT EXISTS idx_model_levels_connection_id ON model_levels ((data->>'connection_id'));
+                    CREATE INDEX IF NOT EXISTS idx_gateway_apps_app_id ON gateway_apps ((data->>'app_id'));
+                    CREATE INDEX IF NOT EXISTS idx_tools_type ON tools ((data->>'type'));
+                    CREATE INDEX IF NOT EXISTS idx_tools_enabled ON tools ((data->>'enabled'));
+                    CREATE INDEX IF NOT EXISTS idx_chat_logs_app_id ON chat_logs ((data->>'app_id'));
+                    CREATE INDEX IF NOT EXISTS idx_chat_logs_session_id ON chat_logs ((data->>'session_id'));
+                    CREATE INDEX IF NOT EXISTS idx_chat_logs_scene_id ON chat_logs ((data->>'scene_id'));
+                    CREATE INDEX IF NOT EXISTS idx_roles_name ON roles ((data->>'name'));
+                    CREATE INDEX IF NOT EXISTS idx_sub_agents_name ON sub_agents ((data->>'name'));
+                    CREATE INDEX IF NOT EXISTS idx_skills_name ON skills ((data->>'name'));
+                    CREATE INDEX IF NOT EXISTS idx_scenes_scene_code ON scenes ((data->>'scene_code'));
+                """))
+                conn.commit()
+                logger.info("PostgreSQL tables and indices ensured.")
         except Exception as e:
-            logger.warning(f"Could not create indices: {e}")
+            logger.warning(f"Could not create tables: {e}")
+
 
     @classmethod
-    def get_db(cls):
-        if cls._db is None:
+    def get_session(cls):
+        if cls._session_factory is None:
             cls.connect()
-        return cls._db
+        return cls._session_factory()

@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
+import json
 from typing import Optional, List, Dict
 from datetime import datetime
 from .database import Database
 from .CRUD import CRUD
 from .Schema import FileModel, MemoryModel, FileTypeModel, SessionModel
 
+
 class FileService:
     def __init__(self):
-        self.crud = CRUD(Database.get_db())
+        self.crud = CRUD(Database.get_session)  # 改这里
         self.collection = "files"
 
     def get_file_info(self, file_id: str) -> Optional[Dict]:
         return self.crud.find_one(self.collection, {"file_id": file_id})
 
     def save_file_info(self, file_info: FileModel) -> str:
-        """保存或获取已存在文件的ID"""
         if hit := self.get_file_info(file_info.file_id):
             return hit["_id"]
-        
         doc = file_info.model_dump(by_alias=True, exclude_none=True)
         return self.crud.insert_document(self.collection, doc)
 
@@ -31,7 +31,7 @@ class FileService:
 
 class MemoryService:
     def __init__(self):
-        self.crud = CRUD(Database.get_db())
+        self.crud = CRUD(Database.get_session)  # 改这里
         self.collection = "memories"
 
     def save_memory(self, session_id: str, role: str, content: str):
@@ -39,21 +39,18 @@ class MemoryService:
             "session_id": session_id,
             "role": role,
             "content": content,
-            "timestamp": datetime.now()
+            "timestamp": datetime.now().isoformat()  # 改成字符串，JSONB里好排序
         }
         return self.crud.insert_document(self.collection, doc)
 
     def get_recent_memories(self, session_id: str, last_n: int = 10) -> List[Dict]:
-        """获取最近 n 条记录，并按时间正序排列（AI上下文需要）"""
-        # 先取倒序最后 n 条
         mems = self.crud.find_documents(
-            self.collection, 
-            {"session_id": session_id}, 
-            sort_by="timestamp", 
-            ascending=False, 
+            self.collection,
+            {"session_id": session_id},
+            sort_by="timestamp",
+            ascending=False,
             limit=last_n
         )
-        # 翻转回正序
         return mems[::-1]
 
     def delete_memories_by_session(self, session_id: str) -> int:
@@ -62,15 +59,14 @@ class MemoryService:
 
 class FileTypeService:
     def __init__(self):
-        self.crud = CRUD(Database.get_db())
+        self.crud = CRUD(Database.get_session)  # 改这里
         self.collection = "config"
 
     def update_file_types(self, model: FileTypeModel):
         self.crud.update_document(
-            self.collection, 
-            {"_id": "global_file_types"}, 
-            model.model_dump(), 
-            upsert=True
+            self.collection,
+            {"_id": "global_file_types"},
+            model.model_dump(),upsert=True
         )
 
     def get_file_types(self) -> List[str]:
@@ -80,16 +76,12 @@ class FileTypeService:
 
 class SessionService:
     def __init__(self):
-        # 初始化时获取数据库连接
-        self.db = Database.get_db()
-        self.crud = CRUD(self.db)
+        self.crud = CRUD(Database.get_session)  # 改这里
         self.collection = "sessions"
-        # 内部组合其他服务，实现级联操作
         self.memory_service = MemoryService()
         self.file_service = FileService()
 
     def get_session(self, session_id: str) -> Optional[SessionModel]:
-        """获取会话模型对象"""
         data = self.crud.find_one(self.collection, {"session_id": session_id})
         return SessionModel(**data) if data else None
 
@@ -97,91 +89,96 @@ class SessionService:
 
     def add_file_to_session(self, session_id: str, file_info: FileModel):
         """
-        全自动化：保存/更新文件实体 + 将文件ID关联到会话
+        原来用MongoDB 的 $addToSet，现在改成：
+        1. 查出当前 file_list
+        2. 去重追加
+        3. 写回去
         """
-        # 1. 调用 FileService 确保文件已经存在于 files 集合中
-        # 这里会返回插入的 ID 或已存在的 ID，但我们通常在 file_list 存业务 file_id
         self.file_service.save_file_info(file_info)
-        
-        # 2. 将 file_id 记录在 Session 的 file_list 列表中
-        # 使用 $addToSet 确保不会重复添加同一个文件 ID
-        # 使用 upsert=True 确保如果会话文档不存在则自动创建
-        self.db[self.collection].update_one(
-            {"session_id": session_id},
-            {
-                "$addToSet": {"file_list": file_info.file_id},
-                "$setOnInsert": {"created_at": datetime.now()}
-            },
-            upsert=True
-        )
+
+        session = self.get_session(session_id)
+
+        if session is None:
+            # 会话不存在，创建新会话
+            doc = {
+                "session_id": session_id,
+                "created_at": datetime.now().isoformat(),
+                "file_list": [file_info.file_id]
+            }
+            self.crud.insert_document(self.collection, doc)
+        else:
+            # 会话存在，去重追加 file_id
+            current_list = session.file_list or []
+            if file_info.file_id not in current_list:
+                current_list.append(file_info.file_id)
+                self.crud.update_document(
+                    self.collection,
+                    {"session_id": session_id},
+                    {"file_list": current_list}
+                )
+
         return file_info.file_id
 
     def remove_file_from_session(self, session_id: str, file_id: str) -> int:
         """
-        从会话中移除某个文件的关联 (仅断开关联，不删除文件实体)
+        原来用 MongoDB 的 $pull，现在改成：
+        1. 查出当前 file_list
+        2. 移除目标 file_id
+        3. 写回去
         """
-        result = self.db[self.collection].update_one(
+        session = self.get_session(session_id)
+        if session is None or not session.file_list:
+            return 0
+
+        current_list = session.file_list
+        if file_id not in current_list:
+            return 0
+
+        current_list.remove(file_id)
+        self.crud.update_document(
+            self.collection,
             {"session_id": session_id},
-            {"$pull": {"file_list": file_id}}
+            {"file_list": current_list}
         )
-        return result.modified_count
+        return 1
 
     def get_session_files_content(self, session_id: str, file_id: Optional[str] = None) -> List[Dict]:
-        """
-        获取某个会话关联的所有文件的详细内容或者单个文件内容
-        用于给 AI 喂数据
-        """
         session = self.get_session(session_id)
         if not session or not session.file_list:
             return []
-        
-        # 确定要查询的范围：是指定文件还是全部文件
+
         if file_id:
-            # 如果指定了 file_id，先验证它是否在当前会话的列表中
             if file_id not in session.file_list:
                 return []
             target_ids = [file_id]
         else:
             target_ids = session.file_list
-        
-        # 批量从 files 集合查询详情
+
+        # 原来用 MongoDB 的 $in，CRUD 已经支持了
         files_data = self.crud.find_documents(
-            "files", 
+            "files",
             {"file_id": {"$in": target_ids}}
         )
         return files_data
 
-    # --- 2. 记忆的集成管理 ---
+    # --- 记忆的集成管理 ---
 
     def append_chat_message(self, session_id: str, role: str, content: str):
-        """一键存储对话记录"""
         return self.memory_service.save_memory(session_id, role, content)
 
-    # --- 3. 综合查询 ---
+    # --- 综合查询 ---
 
     def get_full_context(self, session_id: str, last_n: int = 10) -> Dict:
-        """
-        AI 助手最核心的方法：
-        一次性拿到：最近聊天记录 (正序) + 该会话关联的所有文件详情
-        """
         history = self.memory_service.get_recent_memories(session_id, last_n)
         files = self.get_session_files_content(session_id)
-        
         return {
             "history": history,
             "files": files
         }
 
-    # --- 4. 彻底销毁 ---
+    # --- 彻底销毁 ---
 
     def delete_everything_about_session(self, session_id: str):
-        """
-        级联删除：删除会话所有记忆、删除会话记录本身
-        注意：通常不删除关联的文件实体，因为文件可能被其他会话复用
-        """
-        # 1. 删除所有对话记忆
         self.memory_service.delete_memories_by_session(session_id)
-        
-        # 2. 删除会话本身
         deleted_count = self.crud.delete_document(self.collection, {"session_id": session_id})
         return deleted_count

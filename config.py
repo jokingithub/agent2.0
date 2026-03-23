@@ -13,6 +13,9 @@ class Config:
     MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "agent_db")
 
+    # PG 配置
+    PG_URI = os.getenv("PG_URI", "postgresql://agent:agent123@localhost:5432/agent")
+
     # OpenAI API 配置
     OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
