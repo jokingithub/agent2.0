@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import secrets
 from fastapi import APIRouter, HTTPException
 from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
 from dataBase.ConfigService import (
     ModelConnectionService, ModelLevelService,
     GatewayEnvService, GatewayAppService, GatewayChannelService,
@@ -17,6 +19,11 @@ from dataBase.Schema import (
 )
 
 router = APIRouter(prefix="/config", tags=["配置管理"])
+
+
+class GatewayAppCreateRequest(BaseModel):
+    app_id: str = Field(..., description="应用ID")
+    available_scenes: List[str] = Field(default_factory=list, description="可用场景")
 
 
 # ============================================================
@@ -46,6 +53,21 @@ _gateway_app_service = GatewayAppService()
 def validate_app_token(app_id: str, token: str):
     valid = _gateway_app_service.validate_token(app_id, token)
     return {"valid": valid}
+
+
+@router.post("/gateway-apps", summary="创建外部调用配置")
+def create_gateway_app(data: GatewayAppCreateRequest):
+    payload = data.model_dump()
+    payload["auth_token"] = secrets.token_urlsafe(32)
+
+    model = GatewayAppModel(**payload)
+    doc_id = _gateway_app_service.create(model)
+    return {
+        "id": doc_id,
+        "app_id": payload["app_id"],
+        "auth_token": payload["auth_token"],
+        "message": "外部调用配置创建成功",
+    }
 
 
 # --- 模型降级链 ---
@@ -162,7 +184,8 @@ def register_crud_routes(
     path: str,
     service_class,
     model_class,
-    name: str
+    name: str,
+    create_enabled: bool = True,
 ):
     service = service_class()
 
@@ -177,10 +200,12 @@ def register_crud_routes(
             raise HTTPException(status_code=404, detail=f"{name}不存在")
         return result
 
-    @router.post(f"/{path}", summary=f"创建{name}")
-    def create(data: model_class):
-        doc_id = service.create(data)
-        return {"id": doc_id, "message": f"{name}创建成功"}
+    if create_enabled:
+        @router.post(f"/{path}", summary=f"创建{name}")
+        def create(data: Dict):
+            model = model_class(**dict(data))
+            doc_id = service.create(model)
+            return {"id": doc_id, "message": f"{name}创建成功"}
 
     @router.put(f"/{path}/{{doc_id}}", summary=f"更新{name}")
     def update(doc_id: str, data: Dict):
@@ -200,7 +225,7 @@ def register_crud_routes(
 # 注册所有配置的CRUD路由
 register_crud_routes("model-connections", ModelConnectionService, ModelConnectionModel, "模型连接")
 register_crud_routes("model-levels", ModelLevelService, ModelLevelModel, "模型分级")
-register_crud_routes("gateway-apps", GatewayAppService, GatewayAppModel, "外部调用配置")
+register_crud_routes("gateway-apps", GatewayAppService, GatewayAppModel, "外部调用配置", create_enabled=False)
 register_crud_routes("gateway-channels", GatewayChannelService, GatewayChannelModel, "渠道配置")
 register_crud_routes("tools", ToolService, ToolModel, "工具")
 register_crud_routes("roles", RoleService, RoleModel, "角色")
