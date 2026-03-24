@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 from typing import Any, Dict, Optional
 
 from dataBase.ConfigService import GatewayAppService, GatewayEnvService, ToolService
@@ -25,8 +26,19 @@ class GatewayConfigStore:
             if first.startswith("http://") or first.startswith("https://"):
                 return first
 
-        port = int(env.get("port", 8000))
-        host = "127.0.0.1"
+        env_backend = os.getenv("BACKEND_BASE_URL", "").strip().rstrip("/")
+        if env_backend.startswith("http://") or env_backend.startswith("https://"):
+            return env_backend
+
+        default_port = int(os.getenv("BACKEND_PORT", "8000"))
+        port = int(env.get("port", default_port))
+
+        in_docker = os.path.exists("/.dockerenv")
+        if in_docker:
+            host = os.getenv("BACKEND_HOST", "main-app")
+        else:
+            host = os.getenv("BACKEND_HOST", "127.0.0.1")
+
         return f"http://{host}:{port}"
 
     def validate_token(self, token: str) -> bool:

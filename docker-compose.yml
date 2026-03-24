@@ -1,36 +1,128 @@
 services:
-  ocr-service:
-    build: ./ocr-service
-    container_name: ocr-service
-    ports:
-      - "8001:8001"
+  pgsql:
+    image: pgvector/pgvector:pg16
+    container_name: ai2-pgsql
     environment:
-      - PYTHONUNBUFFERED=1
+      - POSTGRES_DB=${PG_DB:-agent}
+      - POSTGRES_USER=${PG_USER:-agent}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-agent123}
+    ports:
+      - "5432:5432"
     volumes:
-      - ./OCR:/app/OCR:ro  # 挂载OCR模块（只读）
-      - /tmp/ocr_uploads:/tmp/ocr_uploads  # 临时文件存储
+      - ai2_pg_data:/var/lib/postgresql/data
+      - ./dataBase/initdb:/docker-entrypoint-initdb.d:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-agent} -d ${PG_DB:-agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse-db:
+    image: postgres:16
+    container_name: langfuse-db
+    environment:
+      - POSTGRES_DB=langfuse
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=langfuse
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: langfuse
+    ports:
+      - "3301:3000"
+    environment:
+      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      - NEXTAUTH_URL=http://localhost:3301
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-change-me-nextauth-secret}
+      - SALT=${LANGFUSE_SALT:-change-me-langfuse-salt}
+      - TELEMETRY_ENABLED=false
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
+    container_name: ai2-gateway
+    ports:
+      - "9000:9000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
+      - BACKEND_BASE_URL=${BACKEND_BASE_URL:-http://main-app:8000}
+    command: uvicorn gateway.main:app --host 0.0.0.0 --port 9000
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      main-app:
+        condition: service_started
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+
+  # ocr-service:
+  #   build:
+  #     context: ./ocr-service
+  #     dockerfile: Dockerfile
+  #     args:
+  #       BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
+  #   container_name: ocr-service
+  #   ports:
+  #     - "8001:8001"
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+  #   volumes:
+  #     - ./ocr-service/OCR:/app/OCR:ro  # 挂载OCR模块（只读）
+  #     - /tmp/ocr_uploads:/tmp/ocr_uploads  # 临时文件存储
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 40s
 
   # 可选：主应用服务
   main-app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
     container_name: main-app
     ports:
       - "8000:8000"
     environment:
+      - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
       - OCR_SERVICE_URL=http://ocr-service:8001
       - USE_OCR_SERVICE=true
+      - LANGFUSE_HOST=http://langfuse:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
     depends_on:
-      ocr-service:
+      pgsql:
         condition: service_healthy
+      langfuse:
+        condition: service_started
     volumes:
       - ./sessions:/app/sessions
       - ./fileUpload:/app/fileUpload
       - ./uploads:/app/uploads
     restart: unless-stopped
+
+volumes:
+  ai2_pg_data:
+  langfuse_db_data:

@@ -5,15 +5,19 @@
 from typing import Any
 import json
 import os
+import secrets
 
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse
 from fileUpload.fileUpload import save_file
 from logger import logger
 from app.config_api import router as config_router
+from dataBase.ConfigService import GatewayAppService
+from dataBase.Schema import GatewayAppModel
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -23,10 +27,45 @@ except Exception:
 app = FastAPI(title="AI2.0 API", version="1.0.0")
 app.include_router(config_router)
 graph = create_graph()
+gateway_app_service = GatewayAppService()
+
+
+class RegisterAppRequest(BaseModel):
+    app_id: str = Field(..., description="应用ID")
+    available_scenes: list[str] = Field(default_factory=list, description="可用场景")
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/app/register")
+def register_app(req: RegisterAppRequest) -> dict[str, Any]:
+    """
+    注册或更新外部调用应用（gateway_apps）。
+    - app_id 不存在：新增
+    - app_id 已存在：自动重置 token 并更新可用场景
+    """
+    auth_token = secrets.token_urlsafe(32)
+
+    current = gateway_app_service.get_by_app_id(req.app_id)
+    if current:
+        gateway_app_service.update(
+            current["_id"],
+            {
+                "auth_token": auth_token,
+                "available_scenes": req.available_scenes,
+            },
+        )
+        return {"id": current["_id"], "app_id": req.app_id, "auth_token": auth_token, "message": "应用更新成功"}
+
+    doc = GatewayAppModel(
+        app_id=req.app_id,
+        auth_token=auth_token,
+        available_scenes=req.available_scenes,
+    )
+    doc_id = gateway_app_service.create(doc)
+    return {"id": doc_id, "app_id": req.app_id, "auth_token": auth_token, "message": "应用注册成功"}
 
 
 @app.post("/upload", response_model=UploadResponse)
