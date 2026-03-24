@@ -10,8 +10,8 @@ load_dotenv()
 
 class Config:
     # MongoDB 配置
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-    MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "agent_db")
+    # MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+    # MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "agent_db")
 
     # PG 配置
     PG_URI = os.getenv("PG_URI", "postgresql://agent:agent123@localhost:5432/agent")
