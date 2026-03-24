@@ -2,7 +2,7 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Any, Dict
 from datetime import datetime
-from fileUpload.Schema import Letter_Of_Guarantee_Format
+from logger import logger
 
 class FileModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
@@ -12,7 +12,7 @@ class FileModel(BaseModel):
     file_name: str
     file_type: List[str]
     content: str
-    main_info: Optional[Letter_Of_Guarantee_Format] = None
+    main_info: Optional[Dict[str, Any]] = None  # 通用字典，字段由 file_processing 配置决定
     upload_time: datetime = Field(default_factory=datetime.now)
 
 class MemoryModel(BaseModel):
@@ -126,19 +126,18 @@ class ToolModel(BaseModel):
 
 
 class ChatLogModel(BaseModel):
-    """会话日志"""
+    """会话日志（业务维度，技术细节交给 Langfuse）"""
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
-    app_id: str
-    scene_id: str
-    session_id: str
-    request_content: str
-    response_content: str
-    token_usage: int = 0
-    request_time: datetime
-    first_response_time: Optional[datetime] = None
-    end_response_time: Optional[datetime] = None
+    app_id: str = ""
+    scene_id: str = ""
+    session_id: str = ""
+    request_content: str = ""
+    response_content: str = ""
+    langfuse_trace_id: str = ""    # 关联 Langfuse trace，可跳转查看 token/耗时/调用链
+    request_time: Optional[str] = None
+
 
 
 # ---------- 业务配置 ----------
@@ -190,10 +189,12 @@ class FileProcessingModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
-    file_type: str                         # pdf / docx / image
+    file_type: str                         # 保函 / 合同 / 发票 等业务类型
     fields: List[str] = Field(default_factory=list)  # 需要抽取的要素
+    prompt: Optional[str] = None           # 自定义提示词，不填用通用模板
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+
 
 
 class SceneModel(BaseModel):

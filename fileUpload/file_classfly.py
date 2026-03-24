@@ -7,6 +7,7 @@ from app.core.llm import get_model
 from logger import logger
 from dataBase.Service import FileTypeService
 from dataBase.Schema import FileTypeModel
+from dataBase.ConfigService import FileProcessingService
 
 # 保持在外面，避免重复加载模型
 model = get_model(model_choice="high")
@@ -17,12 +18,18 @@ def classify_file(file_content: str) -> list[str]:
     """
     file_type_service = FileTypeService()
     try:
-        # 1. 获取定义的类型列表
-        file_types = file_type_service.get_file_types()
+        # 1. 优先从 file_processing 配置表读可用类型（单一来源，不会不一致）
+        fp_configs = FileProcessingService().get_all()
+        file_types = [c.get("file_type") for c in fp_configs if c.get("file_type")]
+
+        # 兜底：配置表为空时从 config 表读，再为空用默认值
+        if not file_types:
+            file_types = file_type_service.get_file_types()
         if not file_types:
             default_types = ["合同", "发票", "报告", "其他", "保函"]
             file_type_service.update_file_types(FileTypeModel(file_type=default_types))
             file_types = default_types
+
 
         logger.info(f"当前可用文件类型: {file_types}")
 
