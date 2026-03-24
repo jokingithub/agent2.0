@@ -1,38 +1,113 @@
 # -*- coding: utf-8 -*-
+# 文件：fileUpload/element_extraction.py
+# 配置驱动的要素抽取，从 file_processing 表读取字段和提示词
+
+import json
 import re
 from app.core.llm import get_model
+from dataBase.ConfigService import FileProcessingService
 from logger import logger
-from fileUpload.Schema import Letter_Of_Guarantee_Format
-from prompt.file_prompt import system_prompt
 
-model = get_model(model_choice="high").with_structured_output(Letter_Of_Guarantee_Format)
+_fp_service = FileProcessingService()
+
+_DEFAULT_PROMPT_TEMPLATE = """# Role
+你是一个专业的数据抽取专家，擅长从各类文档中精确提取关键信息。
+
+# Task
+请从【原始文本】中提取以下字段，严格按 JSON 格式返回。
+
+# 需要提取的字段
+{fields_desc}
+
+# 约束
+1. 返回纯 JSON，不要包裹在 markdown 代码块中。
+2. 所有内容必须来自原文，严禁捏造。
+3. 未提及的字段设为 null。
+4. 保持数值的原始精度。"""
+
+
+def _parse_json_response(text: str) -> dict:
+    """从 LLM 回复中提取 JSON"""
+    # 直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 提取 ```json ... ``` 块
+    match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 提取第一个 { ... }
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    logger.error(f"无法解析 LLM 返回的 JSON: {text[:200]}")
+    return {"_parse_error": True, "_raw": text[:500]}
+
+
+def _find_config(file_type: str) -> dict | None:
+    """查配置，支持精确匹配和模糊匹配"""
+    # 精确匹配
+    config = _fp_service.get_by_file_type(file_type)
+    if config:
+        return config
+
+    # 模糊匹配：AI分类可能返回"履约保函"，配置表里是"保函"
+    all_configs = _fp_service.get_all()
+    for c in all_configs:
+        ct = c.get("file_type", "")
+        if ct in file_type or file_type in ct:
+            logger.info(f"模糊匹配: '{file_type}' → '{ct}'")
+            return c
+
+    return None
+
 
 def element_extraction(file_content: str, file_type: str) -> dict:
-    logger.info(f"正在处理文件类型: {file_type}")
-    
+    """
+    根据 file_processing 配置表抽取要素。
+    file_type: AI分类结果，如 "保函"、"合同"（可能是列表中的某一项）
+    """
+    logger.info(f"要素抽取 - 文件类型: {file_type}")
+
+    # 1. 查配置表
+    config = _find_config(file_type)
+
+    if not config:
+        logger.warning(f"file_processing 表无 '{file_type}' 配置，跳过抽取")
+        return {}
+
+    fields = config.get("fields", [])
+    if not fields:
+        logger.warning(f"'{file_type}' 配置的 fields 为空，跳过抽取")
+        return {}
+
+    # 2. 构造 prompt
+    custom_prompt = config.get("prompt")
+    if custom_prompt:
+        system_prompt = custom_prompt
+    else:
+        fields_desc = "\n".join([f"- {f}" for f in fields])
+        system_prompt = _DEFAULT_PROMPT_TEMPLATE.format(fields_desc=fields_desc)
+
+    # 3. 调用 LLM
+    model = get_model("high")
+    messages = [
+        ("system", system_prompt),
+        ("user", f"请从以下文本中提取要素：\n\n{file_content}")
+    ]
+
     try:
-        if "保函" in file_type:
-            # 1. 构造清晰的消息结构
-            messages = [
-                ("system", system_prompt.ELEMENT_EXTRACTION_Letter_Of_Guarantee_Format),
-                ("user", f"请从以下文本中提取要素：\n\n{file_content}")
-            ]
-            
-            # 2. 调用模型
-            # 注意：使用 with_structured_output 后，response 直接就是 Letter_Of_Guarantee_Format 对象
-            response = model.invoke(messages)
-            
-            # 3. 记录并转换
-            logger.debug(f"模型结构化输出: {response}")
-            
-            # 如果 response 是 Pydantic 模型，转为字典返回
-            return response.dict() if hasattr(response, 'dict') else response
-
-        else:
-            logger.warning(f"{file_type} 未知类型，跳过提取")
-            return {"error": "未知类型"}
-
+        response = model.invoke(messages)
+        result = _parse_json_response(response.content)
+        logger.info(f"要素抽取完成: {list(result.keys())}")
+        return result
     except Exception as e:
-        logger.error(f"提取要素发生异常: {e}", exc_info=True)
-        # 建议返回空字典或标准错误结构，而不是列表，保持返回类型一致
-        return {"status": "error", "message": str(e)}
+        logger.error(f"要素抽取异常: {e}", exc_info=True)
+        return {"_error": str(e)}

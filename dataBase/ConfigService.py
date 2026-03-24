@@ -5,11 +5,11 @@ from .database import Database
 from .CRUD import CRUD
 from .Schema import (
     ModelConnectionModel, ModelLevelModel,
-    GatewayEnvModel, GatewayAppModel, GatewayChannelModel,
-    ToolModel, ChatLogModel,
+    GatewayEnvModel, GatewayAppModel, GatewayChannelModel,ToolModel, ChatLogModel,
     RoleModel, SubAgentModel, SkillModel,
     FileProcessingModel, SceneModel,
 )
+from logger import logger
 
 
 class BaseConfigService:
@@ -141,6 +141,14 @@ class ChatLogService(BaseConfigService):
     def log(self, data: ChatLogModel) -> str:
         return self.create(data)
 
+    async def save_log_async(self, log_data: dict):
+        """异步保存日志，不阻塞主流程"""
+        try:
+            log_model = ChatLogModel(**log_data)
+            self.create(log_model)
+        except Exception as e:
+            logger.error(f"保存会话日志失败: {e}", exc_info=True)
+
     def get_by_session(self, session_id: str) -> List[Dict]:
         return self.crud.find_documents(
             self.collection,
@@ -148,6 +156,16 @@ class ChatLogService(BaseConfigService):
             sort_by="request_time",
             ascending=True
         )
+
+    def get_by_app(self, app_id: str, limit: int = 100) -> List[Dict]:
+        return self.crud.find_documents(
+            self.collection,
+            {"app_id": app_id},
+            sort_by="request_time",
+            ascending=False,
+            limit=limit
+        )
+
 
     def get_by_app(self, app_id: str, limit: int = 100) -> List[Dict]:
         return self.crud.find_documents(
