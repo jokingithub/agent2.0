@@ -7,10 +7,14 @@ import requests
 import mammoth
 import logging
 from charset_normalizer import from_path
+from config import Config
 from logger import logger
 
 # 配置
-OCR_SERVICE_URL = "http://127.0.0.1:8001"
+OCR_SERVICE_URL = os.getenv(
+    "OCR_SERVICE_URL",
+    getattr(Config, "OCR_SERVICE_URL", "http://127.0.0.1:8001"),
+)
 
 def _format_ocr_to_markdown(ocr_results):
     """关键步骤：将 OCR 返回的数组拼接为可读文本"""
@@ -31,15 +35,36 @@ def _format_ocr_to_markdown(ocr_results):
     return "\n\n---\n\n".join(formatted_pages)
 
 def _call_ocr_api(file_path):
-    """请求远程 OCR 服务"""
+    """请求远程 OCR 服务。
+
+    说明：当 OCR 服务在外部机器/容器外运行时，传 file_path 会指向本机临时路径，
+    远端无法访问。因此这里统一走文件上传接口 /ocr/file。
+    """
     try:
-        resp = requests.post(
-            f"{OCR_SERVICE_URL}/ocr/process",
-            json={"file_path": os.path.abspath(file_path), "batch_size": 4},
-            timeout=300
-        )
+        with open(file_path, "rb") as f:
+            files = {
+                "file": (
+                    os.path.basename(file_path),
+                    f,
+                    "application/octet-stream",
+                )
+            }
+            data = {"batch_size": 4}
+            resp = requests.post(
+                f"{OCR_SERVICE_URL}/ocr/file",
+                files=files,
+                data=data,
+                timeout=300,
+            )
+
         if resp.status_code == 200 and resp.json().get("success"):
             return resp.json().get("data")
+
+        logger.error(
+            "OCR API 非成功响应: status=%s body=%s",
+            resp.status_code,
+            resp.text[:1000],
+        )
         return None
     except Exception as e:
         logger.error(f"OCR API Error: {e}")

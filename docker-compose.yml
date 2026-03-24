@@ -107,7 +107,7 @@ services:
       - "8000:8000"
     environment:
       - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
-      - OCR_SERVICE_URL=http://ocr-service:8001
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://host.docker.internal:8001}
       - USE_OCR_SERVICE=true
       - LANGFUSE_HOST=http://langfuse:3000
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}

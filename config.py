@@ -24,6 +24,14 @@ class Config:
     LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
     LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
     LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3301")
+
+    # OCR服务地址（本地默认 127.0.0.1，Docker 内默认 host.docker.internal）
+    _DEFAULT_OCR_SERVICE_URL = (
+        "http://host.docker.internal:8001"
+        if os.path.exists("/.dockerenv")
+        else "http://127.0.0.1:8001"
+    )
+    OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", _DEFAULT_OCR_SERVICE_URL)
     
     # 还可以加其他配置
     DEBUG = os.getenv("DEBUG", "False") == "True"
