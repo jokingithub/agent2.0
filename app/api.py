@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 # 文件：app/api.py
-# time: 2026/3/10
 
 import json
 import os
 import asyncio
-from typing import Any
-from datetime import datetime
+from typing import Any, Optional
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from langchain_core.callbacks import BaseCallbackHandler
 
 from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse
@@ -20,15 +21,63 @@ from app.config_api import router as config_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
 
-try:
-    from langfuse.langchain import CallbackHandler
-except Exception:
-    CallbackHandler = None
-
 app = FastAPI(title="AI2.0 API", version="1.0.0")
 app.include_router(config_router)
 graph = create_graph()
 
+
+# ============================================================
+# Token & 耗时 收集器
+# ============================================================
+
+class UsageCollector(BaseCallbackHandler):
+    """
+    轻量回调：收集所有 LLM 调用的 token 用量，
+    并记录首次 LLM 开始输出的时间。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.total_tokens: int = 0
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.first_token_time: Optional[datetime] = None
+
+    def on_llm_start(self, *args, **kwargs):
+        """LLM 开始调用时，记录首次时间"""
+        if self.first_token_time is None:
+            self.first_token_time = datetime.now(timezone.utc)
+
+    def on_llm_end(self, response, **kwargs):
+        """LLM 调用结束，累加 token 用量"""
+        try:
+            if response and hasattr(response, "llm_output") and response.llm_output:
+                usage = response.llm_output.get("token_usage") or response.llm_output.get("usage") or {}
+                self.total_tokens += usage.get("total_tokens", 0)
+                self.prompt_tokens += usage.get("prompt_tokens", 0)
+                self.completion_tokens += usage.get("completion_tokens", 0)
+        except Exception:
+            pass
+
+        # 有些模型在 generations 里带 usage
+        try:
+            if response and hasattr(response, "generations"):
+                for gen_list in response.generations:
+                    for gen in gen_list:
+                        info = getattr(gen, "generation_info", None) or {}
+                        usage = info.get("token_usage") or info.get("usage") or {}
+                        # 避免重复累加：只在 llm_output 没拿到时才从这里取
+                        if not (response.llm_output and response.llm_output.get("token_usage")):
+                            self.total_tokens += usage.get("total_tokens", 0)
+                            self.prompt_tokens += usage.get("prompt_tokens", 0)
+                            self.completion_tokens += usage.get("completion_tokens", 0)
+        except Exception:
+            pass
+
+
+# ============================================================
+# 路由
+# ============================================================
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -56,22 +105,9 @@ async def upload_file(
         )
 
 
-def _extract_langfuse_trace_id(callbacks: list) -> str:
-    """从 Langfuse 回调中提取 trace_id"""
-    if not callbacks:
-        return ""
-    try:
-        handler = callbacks[0]
-        if hasattr(handler, "get_trace_id"):
-            return handler.get_trace_id() or ""
-        if hasattr(handler, "trace") and handler.trace:
-            return getattr(handler.trace, "id", "") or ""
-        if hasattr(handler, "trace_id"):
-            return handler.trace_id or ""
-    except Exception:
-        pass
-    return ""
-
+# ============================================================
+# 日志写入
+# ============================================================
 
 async def _save_chat_log(
     app_id: str,
@@ -80,11 +116,13 @@ async def _save_chat_log(
     request_content: str,
     response_content: str,
     request_time: datetime,
-    langfuse_trace_id: str = "",
+    collector: UsageCollector,
 ):
-    """异步保存会话日志（业务维度），同时写入 memory"""
+    """异步保存会话日志 + 对话记忆"""
+    end_time = datetime.now(timezone.utc)
+
+    # 写 memories
     try:
-        # 写 memories 表
         session_service = SessionService()
         session_service.append_chat_message(session_id, "user", request_content, app_id=app_id)
         if response_content:
@@ -93,8 +131,8 @@ async def _save_chat_log(
     except Exception as e:
         logger.error(f"保存会话记忆失败: {e}", exc_info=True)
 
+    # 写 chat_logs
     try:
-        # 写 chat_logs 表
         log_service = ChatLogService()
         log_data = {
             "app_id": app_id,
@@ -102,34 +140,43 @@ async def _save_chat_log(
             "session_id": session_id,
             "request_content": request_content,
             "response_content": response_content,
-            "langfuse_trace_id": langfuse_trace_id,
+            # 耗时
             "request_time": request_time.isoformat(),
+            "first_token_time": collector.first_token_time.isoformat() if collector.first_token_time else None,
+            "end_time": end_time.isoformat(),
+            # token 消耗
+            "total_tokens": collector.total_tokens or None,
+            "prompt_tokens": collector.prompt_tokens or None,
+            "completion_tokens": collector.completion_tokens or None,
         }
         await log_service.save_log_async(log_data)
-        logger.info(f"会话日志已保存: session={session_id}, trace={langfuse_trace_id}")
+        logger.info(
+            f"会话日志已保存: session={session_id}, "
+            f"tokens={collector.total_tokens}"
+        )
     except Exception as e:
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
 
+
+# ============================================================
+# /chat — 非流式
+# ============================================================
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
-    request_time = datetime.now()
+    request_time = datetime.now(timezone.utc)
     app_id = req.app_id or ""
 
-    callbacks = []
-    if CallbackHandler is not None:
-        callbacks.append(CallbackHandler())
+    collector = UsageCollector()
+    callbacks = [collector]
 
     session_service = SessionService()
-
-    # 确保 session 存在（会话容器）
     session_service.ensure_session(req.session_id, app_id=app_id)
 
-    # 读历史上下文
     history = session_service.memory_service.get_recent_messages(
         req.session_id, last_n=20, app_id=app_id
     )
 
-    # 拼接：历史 + 当前消息
     messages = [(msg["role"], msg["content"]) for msg in history]
     messages.append(("user", req.message))
 
@@ -161,8 +208,6 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     final_message = content
             events.append(event)
 
-    # 提取 Langfuse trace_id，异步写入业务日志
-    trace_id = _extract_langfuse_trace_id(callbacks)
     asyncio.create_task(_save_chat_log(
         app_id=app_id,
         scene_id=req.scene_id,
@@ -170,10 +215,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         request_content=req.message,
         response_content=final_message,
         request_time=request_time,
-        langfuse_trace_id=trace_id,
+        collector=collector,
     ))
 
-    # 刷新 session 活跃时间
     session_service.touch_session(req.session_id, app_id=app_id)
 
     return ChatResponse(
@@ -182,21 +226,22 @@ async def chat(req: ChatRequest) -> ChatResponse:
         events=events,
     )
 
+
+# ============================================================
+# /chat/stream — 流式
+# ============================================================
+
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
-    request_time = datetime.now()
+    request_time = datetime.now(timezone.utc)
     app_id = req.app_id or ""
 
-    callbacks = []
-    if CallbackHandler is not None:
-        callbacks.append(CallbackHandler())
+    collector = UsageCollector()
+    callbacks = [collector]
 
     session_service = SessionService()
-
-    # 确保 session 存在
     session_service.ensure_session(req.session_id, app_id=app_id)
 
-    # 读历史上下文
     history = session_service.memory_service.get_recent_messages(
         req.session_id, last_n=20, app_id=app_id
     )
@@ -232,8 +277,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         final_message = content
                 yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-        # 流结束后异步写入业务日志
-        trace_id = _extract_langfuse_trace_id(callbacks)
+        # 流结束后写日志
         asyncio.create_task(_save_chat_log(
             app_id=app_id,
             scene_id=req.scene_id,
@@ -241,10 +285,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             request_content=req.message,
             response_content=final_message,
             request_time=request_time,
-            langfuse_trace_id=trace_id,
+            collector=collector,
         ))
 
-        # 刷新 session 活跃时间
         session_service.touch_session(req.session_id, app_id=app_id)
 
         done_payload = {

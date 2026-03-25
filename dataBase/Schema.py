@@ -167,7 +167,6 @@ class ChatLogModel(BaseModel):
     session_id: str = ""
     request_content: str = ""
     response_content: str = ""
-    langfuse_trace_id: str = ""
     # 耗时
     request_time: Optional[str] = None       # 请求发起时间
     first_token_time: Optional[str] = None   # 开始返回时间（首token）
