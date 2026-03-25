@@ -74,7 +74,12 @@ async def _call_remote_mcp(url: str, tool_name: str, arg_name: str, arg_value: s
     try:
         from fastmcp import Client
         # 使用 SSE 协议连接
-        async with Client.from_url(url) as client:
+        if hasattr(Client, "from_url"):
+            client_ctx = Client.from_url(url)
+        else:
+            client_ctx = Client(url)
+
+        async with client_ctx as client:
             # 构造参数字典，例如 {"city": "北京"}
             kwargs = {arg_name: arg_value}
             result = await client.call_tool(tool_name, kwargs)

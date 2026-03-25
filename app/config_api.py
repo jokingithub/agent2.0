@@ -111,7 +111,13 @@ async def _fetch_mcp_tools(url: str) -> List[Dict[str, Any]]:
     """从 MCP 服务拉取工具清单。兼容不同客户端返回结构。"""
     from fastmcp import Client
 
-    async with Client.from_url(url) as client:
+    # fastmcp 版本兼容：新版本可能没有 Client.from_url
+    if hasattr(Client, "from_url"):
+        client_ctx = Client.from_url(url)
+    else:
+        client_ctx = Client(url)
+
+    async with client_ctx as client:
         if hasattr(client, "list_tools"):
             tools_resp = await client.list_tools()
         elif hasattr(client, "get_tools"):
