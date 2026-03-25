@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import secrets
 from fastapi import APIRouter, HTTPException
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from dataBase.ConfigService import (
     ModelConnectionService, ModelLevelService,
@@ -23,7 +23,8 @@ router = APIRouter(prefix="/config", tags=["配置管理"])
 
 class GatewayAppCreateRequest(BaseModel):
     app_id: str = Field(..., description="应用ID")
-    available_scenes: List[str] = Field(default_factory=list, description="可用场景")
+    available_scenes: List[Dict[str, Any]] = Field(default_factory=list, description="可用场景及功能")
+
 
 
 # ============================================================
@@ -177,7 +178,7 @@ def scene_remove_role(scene_id: str, role_id: str):
     return {"message": "移除成功"}
 
 # ============================================================
-# 通用工厂：为每个配置生成标准CRUD接口
+# 工厂：根据每个配置生成CRUD接口
 # ============================================================
 
 def register_crud_routes(
@@ -201,18 +202,26 @@ def register_crud_routes(
         return result
 
     if create_enabled:
-        @router.post(f"/{path}", summary=f"创建{name}")
-        def create(data: Dict):
-            model = model_class(**dict(data))
-            doc_id = service.create(model)
-            return {"id": doc_id, "message": f"{name}创建成功"}
+        # 用闭包捕获 model_class，让 FastAPI 能读到字段定义
+        def make_create(mc, svc, label):
+            @router.post(f"/{path}", summary=f"创建{label}")
+            def create(data: mc):
+                doc_id = svc.create(data)
+                return {"id": doc_id, "message": f"{label}创建成功"}
+            return create
+        make_create(model_class, service, name)
 
-    @router.put(f"/{path}/{{doc_id}}", summary=f"更新{name}")
-    def update(doc_id: str, data: Dict):
-        count = service.update(doc_id, data)
-        if count == 0:
-            raise HTTPException(status_code=404, detail=f"{name}不存在")
-        return {"message": f"{name}更新成功"}
+    # update 也一样，用 model_class 替代 Dict
+    def make_update(mc, svc, label):
+        @router.put(f"/{path}/{{doc_id}}", summary=f"更新{label}")
+        def update(doc_id: str, data: mc):
+            update_dict = data.model_dump(exclude_none=True, exclude={"id"})
+            count = svc.update(doc_id, update_dict)
+            if count == 0:
+                raise HTTPException(status_code=404, detail=f"{label}不存在")
+            return {"message": f"{label}更新成功"}
+        return update
+    make_update(model_class, service, name)
 
     @router.delete(f"/{path}/{{doc_id}}", summary=f"删除{name}")
     def delete(doc_id: str):
@@ -220,6 +229,7 @@ def register_crud_routes(
         if count == 0:
             raise HTTPException(status_code=404, detail=f"{name}不存在")
         return {"message": f"{name}删除成功"}
+
 
 
 # 注册所有配置的CRUD路由
