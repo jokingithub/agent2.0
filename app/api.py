@@ -37,10 +37,11 @@ def health() -> dict[str, str]:
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(
     session_id: str = Form(..., description="会话 ID"),
+    app_id: str = Form("", description="应用 ID"),
     file: UploadFile = File(..., description="上传的文件")
 ) -> UploadResponse:
     try:
-        result = await save_file(file, session_id)
+        result = await save_file(file, session_id, app_id=app_id)
         return UploadResponse(**result)
     except Exception as e:
         logger.error(f"文件处理失败: {str(e)}", exc_info=False)
@@ -108,6 +109,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     inputs = {
         "session_id": req.session_id,
+        "app_id": req.app_id,
         "messages": [("user", req.message)],
     }
 
@@ -162,6 +164,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
     inputs = {
         "session_id": req.session_id,
+        "app_id": req.app_id,
         "messages": [("user", req.message)],
     }
 

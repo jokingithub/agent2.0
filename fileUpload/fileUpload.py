@@ -19,18 +19,19 @@ from fileUpload.extract_content import extract_content
 from fileUpload.element_extraction import element_extraction
 from logger import logger
 
-async def save_file(file, session_id) -> dict[str, Any]:
+async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
     try:
         file_service = FileService()
         session_service = SessionService()
         file_id = hashlib.md5(await file.read()).hexdigest()
         await file.seek(0)
         # 先检查文件是否已存在，避免重复处理
-        if hits := file_service.get_file_info(file_id):
+        if hits := file_service.get_file_info(file_id, app_id=app_id):
             file_info = FileModel(**hits)
-            session_service.add_file_to_session(session_id, file_info=file_info)
+            session_service.add_file_to_session(session_id, file_info=file_info, app_id=app_id)
             return {
                 "session_id": session_id,
+                "app_id": app_id,
                 "file_name": hits["file_name"],
                 "file_id": hits["file_id"],
                 "file_type": hits["file_type"],
@@ -65,7 +66,7 @@ async def save_file(file, session_id) -> dict[str, Any]:
                 upload_time=datetime.now()
             )
 
-            session_service.add_file_to_session(session_id=session_id,file_info=file_data)
+            session_service.add_file_to_session(session_id=session_id, file_info=file_data, app_id=app_id)
 
             preview = extracted_content[:500] + ("..." if len(extracted_content) > 500 else "")
 

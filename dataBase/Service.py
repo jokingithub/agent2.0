@@ -12,28 +12,32 @@ class FileService:
         self.crud = CRUD(Database.get_session)
         self.collection = "files"
 
-    def get_file_info(self, file_id: str) -> Optional[Dict]:
-        # 直接用主键查询
-        return self.crud.find_one(self.collection, {"_id": file_id})
+    def get_file_info(self, file_id: str, app_id: str = None) -> Optional[Dict]:
+        """按主键查文件，可选 app_id 校验"""
+        doc = self.crud.find_one(self.collection, {"_id": file_id})
+        if doc and app_id and doc.get("app_id", "") != app_id:
+            return None  # app_id 不匹配，视为不存在
+        return doc
+
+    def get_files_by_app(self, app_id: str) -> List[Dict]:
+        """获取某个 app 下的所有文件"""
+        return self.crud.find_documents(self.collection, {"app_id": app_id})
 
     def save_file_info(self, file_info: FileModel) -> str:
-        # 用 file_id 作为主键，主键冲突时直接返回
         doc = file_info.model_dump(by_alias=True, exclude_none=True, exclude={'id'})
-        doc["_id"] = file_info.file_id  # 显式设置主键为 MD5
+        doc["_id"] = file_info.file_id
 
         # 先查询是否存在
-        if hit := self.get_file_info(file_info.file_id):
+        if hit := self.crud.find_one(self.collection, {"_id": file_info.file_id}):
             return hit["_id"]
 
         return self.crud.insert_document(self.collection, doc)
 
     def update_file_info(self, file_id: str, update_data: FileModel) -> int:
-        # 用主键更新
         data = update_data.model_dump(exclude_none=True, exclude={'id', 'file_id'})
         return self.crud.update_document(self.collection, {"_id": file_id}, data)
 
     def delete_file_info(self, file_id: str) -> int:
-        # 用主键删除
         return self.crud.delete_document(self.collection, {"_id": file_id})
 
 
@@ -42,8 +46,9 @@ class MemoryService:
         self.crud = CRUD(Database.get_session)
         self.collection = "memories"
 
-    def save_memory(self, session_id: str, role: str, content: str):
+    def save_memory(self, session_id: str, role: str, content: str, app_id: str = ""):
         doc = {
+            "app_id": app_id,
             "session_id": session_id,
             "role": role,
             "content": content,
@@ -51,10 +56,13 @@ class MemoryService:
         }
         return self.crud.insert_document(self.collection, doc)
 
-    def get_recent_memories(self, session_id: str, last_n: int = 10) -> List[Dict]:
+    def get_recent_memories(self, session_id: str, last_n: int = 10, app_id: str = None) -> List[Dict]:
+        query = {"session_id": session_id}
+        if app_id:
+            query["app_id"] = app_id
         mems = self.crud.find_documents(
             self.collection,
-            {"session_id": session_id},
+            query,
             sort_by="timestamp",
             ascending=False,
             limit=last_n
@@ -89,16 +97,24 @@ class SessionService:
         self.memory_service = MemoryService()
         self.file_service = FileService()
 
-    def get_session(self, session_id: str) -> Optional[SessionModel]:
-        data = self.crud.find_one(self.collection, {"session_id": session_id})
+    def get_session(self, session_id: str, app_id: str = None) -> Optional[SessionModel]:
+        query = {"session_id": session_id}
+        if app_id:
+            query["app_id"] = app_id
+        data = self.crud.find_one(self.collection, query)
         return SessionModel(**data) if data else None
 
-    def add_file_to_session(self, session_id: str, file_info: FileModel):
+    def get_sessions_by_app(self, app_id: str) -> List[Dict]:
+        """获取某个 app 下的所有会话"""
+        return self.crud.find_documents(self.collection, {"app_id": app_id})
+
+    def add_file_to_session(self, session_id: str, file_info: FileModel, app_id: str = ""):
         self.file_service.save_file_info(file_info)
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, app_id=app_id)
 
         if session is None:
             doc = {
+                "app_id": app_id,
                 "session_id": session_id,
                 "created_at": datetime.now().isoformat(),
                 "file_list": [file_info.file_id]
@@ -133,8 +149,8 @@ class SessionService:
         )
         return 1
 
-    def get_session_files_content(self, session_id: str, file_id: Optional[str] = None) -> List[Dict]:
-        session = self.get_session(session_id)
+    def get_session_files_content(self, session_id: str, file_id: Optional[str] = None, app_id: str = None) -> List[Dict]:
+        session = self.get_session(session_id, app_id=app_id)
         if not session or not session.file_list:
             return []
 
@@ -145,19 +161,18 @@ class SessionService:
         else:
             target_ids = session.file_list
 
-        # 用主键批量查询（更快）
         files_data = self.crud.find_documents(
             "files",
             {"_id": {"$in": target_ids}}
         )
         return files_data
 
-    def append_chat_message(self, session_id: str, role: str, content: str):
-        return self.memory_service.save_memory(session_id, role, content)
+    def append_chat_message(self, session_id: str, role: str, content: str, app_id: str = ""):
+        return self.memory_service.save_memory(session_id, role, content, app_id=app_id)
 
-    def get_full_context(self, session_id: str, last_n: int = 10) -> Dict:
-        history = self.memory_service.get_recent_memories(session_id, last_n)
-        files = self.get_session_files_content(session_id)
+    def get_full_context(self, session_id: str, last_n: int = 10, app_id: str = None) -> Dict:
+        history = self.memory_service.get_recent_memories(session_id, last_n, app_id=app_id)
+        files = self.get_session_files_content(session_id, app_id=app_id)
         return {
             "history": history,
             "files": files
