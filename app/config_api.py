@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import asyncio
+import os
 import secrets
 from fastapi import APIRouter, HTTPException
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from dataBase.ConfigService import (
     ModelConnectionService, ModelLevelService,
@@ -24,6 +26,13 @@ router = APIRouter(prefix="/config", tags=["配置管理"])
 class GatewayAppCreateRequest(BaseModel):
     app_id: str = Field(..., description="应用ID")
     available_scenes: List[str] = Field(default_factory=list, description="可用场景")
+
+
+class MCPToolSyncRequest(BaseModel):
+    url: Optional[str] = Field(default=None, description="MCP SSE地址，如 http://127.0.0.1:9001/sse")
+    default_category: str = Field(default="mcp", description="当远端工具未提供分类时使用的默认分类")
+    dry_run: bool = Field(default=False, description="仅预览，不写入数据库")
+    prune_missing: bool = Field(default=False, description="是否自动下线远端已不存在的本地MCP工具")
 
 
 # ============================================================
@@ -81,6 +90,73 @@ def get_fallback_chain():
 # --- 工具查询 ---
 _tool_service = ToolService()
 
+
+def _extract_arg_name_from_schema(input_schema: Any) -> str:
+    """从 MCP input schema 中尽可能提取首个参数名。"""
+    if not isinstance(input_schema, dict):
+        return "query"
+
+    props = input_schema.get("properties")
+    if isinstance(props, dict) and props:
+        return str(next(iter(props.keys())))
+
+    required = input_schema.get("required")
+    if isinstance(required, list) and required:
+        return str(required[0])
+
+    return "query"
+
+
+async def _fetch_mcp_tools(url: str) -> List[Dict[str, Any]]:
+    """从 MCP 服务拉取工具清单。兼容不同客户端返回结构。"""
+    from fastmcp import Client
+
+    async with Client.from_url(url) as client:
+        if hasattr(client, "list_tools"):
+            tools_resp = await client.list_tools()
+        elif hasattr(client, "get_tools"):
+            tools_resp = await client.get_tools()
+        else:
+            raise RuntimeError("当前 fastmcp Client 不支持 list_tools/get_tools")
+
+    # 兼容：直接 list，或对象里带 tools 字段
+    if isinstance(tools_resp, list):
+        raw_tools = tools_resp
+    elif hasattr(tools_resp, "tools"):
+        raw_tools = getattr(tools_resp, "tools") or []
+    elif isinstance(tools_resp, dict) and isinstance(tools_resp.get("tools"), list):
+        raw_tools = tools_resp.get("tools")
+    else:
+        raw_tools = []
+
+    result: List[Dict[str, Any]] = []
+    for item in raw_tools:
+        if isinstance(item, dict):
+            name = item.get("name")
+            description = item.get("description", "")
+            input_schema = item.get("inputSchema") or item.get("input_schema") or {}
+        else:
+            name = getattr(item, "name", None)
+            description = getattr(item, "description", "")
+            input_schema = (
+                getattr(item, "inputSchema", None)
+                or getattr(item, "input_schema", None)
+                or {}
+            )
+
+        if not name:
+            continue
+
+        result.append(
+            {
+                "name": str(name),
+                "description": str(description or ""),
+                "arg_name": _extract_arg_name_from_schema(input_schema),
+            }
+        )
+
+    return result
+
 @router.get("/tools/enabled", summary="获取所有启用的工具")
 def get_enabled_tools():
     return _tool_service.get_enabled()
@@ -88,6 +164,72 @@ def get_enabled_tools():
 @router.get("/tools/type/{tool_type}", summary="按类型查工具")
 def get_tools_by_type(tool_type: str):
     return _tool_service.get_by_type(tool_type)
+
+
+@router.post("/tools/sync-from-mcp", summary="从MCP服务扫描并同步工具")
+def sync_tools_from_mcp(data: MCPToolSyncRequest):
+    url = data.url or os.getenv("MCP_SYNC_URL") or "http://127.0.0.1:9001/sse"
+
+    try:
+        mcp_tools = asyncio.run(_fetch_mcp_tools(url))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取MCP工具失败: {e}")
+
+    remote_tool_names = {t["name"] for t in mcp_tools}
+
+    if data.dry_run:
+        stale_tools = []
+        if data.prune_missing:
+            local_mcp_tools = _tool_service.query({"type": "mcp", "url": url})
+            stale_tools = [
+                {"id": x.get("_id"), "name": x.get("name")}
+                for x in local_mcp_tools
+                if x.get("name") not in remote_tool_names and x.get("enabled", True)
+            ]
+        return {
+            "message": "预览成功（未写库）",
+            "url": url,
+            "count": len(mcp_tools),
+            "tools": mcp_tools,
+            "prune_missing": data.prune_missing,
+            "stale_tools": stale_tools,
+        }
+
+    synced = []
+    for t in mcp_tools:
+        payload = {
+            "name": t["name"],
+            "type": "mcp",
+            "category": data.default_category,
+            "url": url,
+            "enabled": True,
+            "description": t.get("description", ""),
+            "config": {
+                "remote_tool_name": t["name"],
+                "arg_name": t.get("arg_name", "query"),
+                "expose_to_agent": True,
+            },
+        }
+        doc_id = _tool_service.upsert_mcp_tool(payload)
+        synced.append({"id": doc_id, "name": t["name"]})
+
+    disabled = []
+    if data.prune_missing:
+        local_mcp_tools = _tool_service.query({"type": "mcp", "url": url})
+        for x in local_mcp_tools:
+            if x.get("name") not in remote_tool_names and x.get("enabled", True):
+                _tool_service.update(x["_id"], {"enabled": False})
+                disabled.append({"id": x.get("_id"), "name": x.get("name")})
+
+    return {
+        "message": "MCP工具同步完成",
+        "url": url,
+        "count": len(synced),
+        "tools": synced,
+        "prune_missing": data.prune_missing,
+        "disabled_count": len(disabled),
+        "disabled_tools": disabled,
+    }
 
 
 # --- 会话日志 ---
