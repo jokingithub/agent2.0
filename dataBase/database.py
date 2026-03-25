@@ -77,6 +77,9 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions ((data->>'session_id'));
                     CREATE INDEX IF NOT EXISTS idx_memories_session_id ON memories ((data->>'session_id'));
                     CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories ((data->>'timestamp'));
+                    CREATE INDEX IF NOT EXISTS idx_files_app_id ON files ((data->>'app_id'));
+                    CREATE INDEX IF NOT EXISTS idx_sessions_app_id ON sessions ((data->>'app_id'));
+                    CREATE INDEX IF NOT EXISTS idx_memories_app_id ON memories ((data->>'app_id'));
                 """))
 
                 # 配置表索引
@@ -94,6 +97,9 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_sub_agents_name ON sub_agents ((data->>'name'));
                     CREATE INDEX IF NOT EXISTS idx_skills_name ON skills ((data->>'name'));
                     CREATE INDEX IF NOT EXISTS idx_scenes_scene_code ON scenes ((data->>'scene_code'));
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_app_session ON memories ((COALESCE(data->>'app_id','')), (data->>'session_id'));
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_app_session ON sessions ((COALESCE(data->>'app_id','')), (data->>'session_id'));
+
                 """))
                 conn.commit()
                 logger.info("PostgreSQL tables and indices ensured.")

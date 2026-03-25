@@ -13,3 +13,5 @@ class AgentState(TypedDict):
     next: str
     # 当前会话 ID（用于隔离会话级资源）
     session_id: str
+    # 应用隔离
+    app_id: str

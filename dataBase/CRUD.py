@@ -110,7 +110,6 @@ class CRUD:
         return result.rowcount
 
     #----内部工具方法 ----
-
     def _build_where(self, query: Dict) -> tuple:
         if not query:
             return "1=1", {}
@@ -122,8 +121,18 @@ class CRUD:
             param_name = f"p{i}"
 
             if key == "_id":
-                conditions.append(f"id = :{param_name}")
-                params[param_name] = str(value)
+                if isinstance(value, dict) and "$in" in value:
+                    # _id + $in → 查 id 列
+                    in_values = value["$in"]
+                    placeholders = []
+                    for j, v in enumerate(in_values):
+                        ph = f"{param_name}_{j}"
+                        placeholders.append(f":{ph}")
+                        params[ph] = str(v)
+                    conditions.append(f"id IN ({', '.join(placeholders)})")
+                else:
+                    conditions.append(f"id = :{param_name}")
+                    params[param_name] = str(value)
             elif isinstance(value, dict) and "$in" in value:
                 in_values = value["$in"]
                 placeholders = []
@@ -137,6 +146,7 @@ class CRUD:
                 params[param_name] = str(value)
 
         return " AND ".join(conditions), params
+
 
     def _row_to_doc(self, row) -> Dict:
         doc = row[1] if isinstance(row[1], dict) else json.loads(row[1])

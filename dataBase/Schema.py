@@ -8,21 +8,22 @@ class FileModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
-    file_id: str                   # 业务唯一ID
+    app_id: str = ""                # 新增：应用隔离
+    file_id: str
     file_name: str
     file_type: List[str]
     content: str
-    main_info: Optional[Dict[str, Any]] = None  # 通用字典，字段由 file_processing 配置决定
+    main_info: Optional[Dict[str, Any]] = None
     upload_time: datetime = Field(default_factory=datetime.now)
 
 class MemoryModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
-    
+
     id: Optional[Any] = Field(alias="_id", default=None)
+    app_id: str = ""
     session_id: str
-    timestamp: datetime = Field(default_factory=datetime.now)
-    role: str                      # 'user' or 'assistant'
-    content: str
+    messages: List[Dict[str, str]] = Field(default_factory=list)  # role/content/ts
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 class FileTypeModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -32,9 +33,10 @@ class SessionModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
+    app_id: str = ""                # 新增：应用隔离
     session_id: str
     created_at: datetime = Field(default_factory=datetime.now)
-    file_list: List[str] = Field(default_factory=list) # 存储 file_id (string)
+    file_list: List[str] = Field(default_factory=list)
 
 #============================================================
 # 配置相关模型
@@ -82,15 +84,27 @@ class GatewayEnvModel(BaseModel):
 
 
 class GatewayAppModel(BaseModel):
-    """网关- 外部调用配置"""
+    """网关 - 外部调用配置"""
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
     app_id: str
     auth_token: str
-    available_scenes: List[str] = Field(default_factory=list)
+    available_scenes: List[Dict[str, Any]] = Field(default_factory=list, description="""
+        [
+            {
+                "scene_code": "quotation",
+                "features": ["chat", "upload", "report"]
+            },
+            {
+                "scene_code": "review",
+                "features": ["chat"]
+            }
+        ]
+    """)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+
 
 
 class GatewayChannelModel(BaseModel):
@@ -109,24 +123,42 @@ class GatewayChannelModel(BaseModel):
 
 
 class ToolModel(BaseModel):
-    """工具（MCP / HTTP / workflow统一管理）"""
+    """工具（MCP / HTTP / workflow 统一管理）"""
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
     name: str
-    type: str                # mcp / http
+    type: str                              # mcp / http
     category: str                          # web_search / chart / workflow / ocr / enterprise / api
-    url: Optional[str] = None
-    enabled: bool = True
     description: Optional[str] = None
-    auth_config: Optional[Dict[str, Any]] = None   # 鉴权相关放这里
-    config: Optional[Dict[str, Any]] = None         # 其他扩展配置
+    enabled: bool = True
+
+    # 调用目标
+    url: Optional[str] = None              # 完整URL 或 基础URL（如 https://api.company.com）
+    method: str = "POST"                   # HTTP方法，从顶层提出来，不藏在config里
+
+    # 调用配置 — 和 gateway/store.py build_tool_target() 对齐
+    config: Optional[Dict[str, Any]] = Field(default=None, description="""
+        {
+            "path": "/api/v1/query",       # 路径，拼在url后面（url是相对路径时拼backend_base_url）
+            "extra_headers": {},           # 额外请求头（如第三方API key）
+            "auth_required": false,        # 是否需要网关鉴权
+            "timeout_sec": 30              # 超时秒数
+        }
+        MCP额外字段:
+        {
+            "tool_name": "web_search",     # MCP工具名
+            "transport": "sse"             # MCP传输方式
+        }
+    """)
+
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
 
+
 class ChatLogModel(BaseModel):
-    """会话日志（业务维度，技术细节交给 Langfuse）"""
+    """会话日志（业务维度，技术细节交给 Langfuse，这里作为备份）"""
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
@@ -135,8 +167,16 @@ class ChatLogModel(BaseModel):
     session_id: str = ""
     request_content: str = ""
     response_content: str = ""
-    langfuse_trace_id: str = ""    # 关联 Langfuse trace，可跳转查看 token/耗时/调用链
-    request_time: Optional[str] = None
+    langfuse_trace_id: str = ""
+    # 耗时
+    request_time: Optional[str] = None       # 请求发起时间
+    first_token_time: Optional[str] = None   # 开始返回时间（首token）
+    end_time: Optional[str] = None           # 结束返回时间
+    # token消耗
+    total_tokens: Optional[int] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+
 
 
 
