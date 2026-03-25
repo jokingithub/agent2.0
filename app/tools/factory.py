@@ -2,6 +2,7 @@
 #文件：app/tools/factory.py
 
 import importlib
+import asyncio
 from pathlib import Path
 from typing import List
 
@@ -87,15 +88,49 @@ def load_skill_as_tool(skill_dir: str) -> Tool:
 # ============================================================
 
 def _create_mcp_tool(tool_config: dict) -> Tool:
-    """从 tools 表的 MCP 类型配置创建 Tool（占位）"""
+    """从 tools 表的 MCP 类型配置创建 Tool（真实调用 FastMCP 服务）"""
     name = tool_config.get("name", "unknown_mcp_tool")
     description = tool_config.get("description", "MCP工具")
     url = tool_config.get("url", "")
+    config = tool_config.get("config") or {}
+    remote_tool_name = config.get("remote_tool_name", name)
+    timeout = config.get("timeout", 30)
 
-    def mcp_placeholder(query: str) -> str:
-        return f"[MCP工具 '{name}'尚未接入，目标地址: {url}，输入: {query}]"
+    if not url:
+        logger.warning(f"MCP工具 '{name}' 缺少 url 配置")
+        return Tool(name=name, description=description, func=lambda query: f"[MCP工具 '{name}' 配置缺失: url]")
 
-    return Tool(name=name, description=description, func=mcp_placeholder)
+    async def _invoke_mcp(query: str) -> str:
+        try:
+            from fastmcp import Client
+        except Exception as e:
+            return f"[MCP工具 '{name}' 依赖缺失: {e}. 请在主系统运行环境安装 fastmcp]"
+
+        async with Client(url, timeout=timeout) as client:
+            result = await client.call_tool(remote_tool_name, {"query": query})
+
+            # FastMCP CallToolResult 一般提供 content 列表，按文本拼接返回。
+            content = getattr(result, "content", None)
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    text = getattr(item, "text", None)
+                    if text is not None:
+                        text_parts.append(str(text))
+                    else:
+                        text_parts.append(str(item))
+                return "\n".join(text_parts).strip() or str(result)
+
+            return str(result)
+
+    def mcp_tool(query: str) -> str:
+        try:
+            return asyncio.run(_invoke_mcp(query))
+        except Exception as e:
+            logger.exception(f"调用MCP工具失败: {name}, url={url}")
+            return f"[MCP工具 '{name}' 调用失败: {e}]"
+
+    return Tool(name=name, description=description, func=mcp_tool)
 
 
 def _create_http_tool(tool_config: dict) -> Tool:

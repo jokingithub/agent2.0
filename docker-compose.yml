@@ -73,6 +73,29 @@ services:
       - ./:/app
     restart: unless-stopped
 
+  mcp-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
+    container_name: mcp-service
+    ports:
+      - "9001:9001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
+      - MCP_TRANSPORT=${MCP_TRANSPORT:-streamable-http}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=9001
+    command: python mcp-service/mcp-service.py
+    depends_on:
+      pgsql:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+
   # ocr-service:
   #   build:
   #     context: ./ocr-service
