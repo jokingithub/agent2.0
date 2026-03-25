@@ -8,6 +8,12 @@ from dotenv import load_dotenv
 # 加载 .env 文件中的变量
 load_dotenv()
 
+
+def _to_bool(value: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 class Config:
     # MongoDB 配置
     # MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
@@ -33,8 +39,18 @@ class Config:
     )
     OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", _DEFAULT_OCR_SERVICE_URL)
     
-    # 还可以加其他配置
-    DEBUG = os.getenv("DEBUG", "False") == "True"
+    # 运行环境：debug / production
+    APP_ENV = os.getenv("APP_ENV", "debug").strip().lower()
+    IS_PRODUCTION = APP_ENV in {"prod", "production"}
+
+    # 兼容旧配置，未显式传入 DEBUG 时由 APP_ENV 推导
+    DEBUG = _to_bool(os.getenv("DEBUG"), default=not IS_PRODUCTION)
+
+    # FastAPI 文档页开关（生产默认关闭）
+    ENABLE_API_DOCS = _to_bool(
+        os.getenv("ENABLE_API_DOCS"),
+        default=not IS_PRODUCTION,
+    )
 
     # 日志配置
     # 日志配置

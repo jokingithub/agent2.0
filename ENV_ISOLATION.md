@@ -29,6 +29,28 @@ docker compose build --no-cache main-app gateway ocr-service
 docker compose up -d main-app gateway ocr-service
 ```
 
+## 生产环境模式（关闭不必要端口与文档页）
+
+已新增 `docker-compose.prod.yml` 作为生产覆盖配置：
+
+- 关闭宿主机端口暴露：`pgsql`、`langfuse`、`main-app`、`mcp-service`
+- 仅保留 `gateway` 对外端口（9000）
+- 强制设置：
+   - `APP_ENV=production`
+   - `ENABLE_API_DOCS=false`
+
+启动命令：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+开发环境仍使用：
+
+```bash
+docker compose up -d
+```
+
 > 如果网络无法访问 `docker.io`，当前已默认使用代理基础镜像：
 > `m.daocloud.io/docker.io/library/python:3.10-slim`
 

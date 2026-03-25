@@ -61,6 +61,8 @@ services:
       - "9000:9000"
     environment:
       - PYTHONUNBUFFERED=1
+      - APP_ENV=${APP_ENV:-debug}
+      - ENABLE_API_DOCS=${ENABLE_API_DOCS:-true}
       - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
       - BACKEND_BASE_URL=${BACKEND_BASE_URL:-http://main-app:8000}
     command: uvicorn gateway.main:app --host 0.0.0.0 --port 9000
@@ -129,6 +131,8 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - APP_ENV=${APP_ENV:-debug}
+      - ENABLE_API_DOCS=${ENABLE_API_DOCS:-true}
       - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
       - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://host.docker.internal:8001}
       - USE_OCR_SERVICE=true

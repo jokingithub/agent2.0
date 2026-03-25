@@ -16,6 +16,7 @@ from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse
 from fileUpload.fileUpload import save_file
 from logger import logger
+from config import Config
 from app.config_api import router as config_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
@@ -25,7 +26,17 @@ try:
 except Exception:
     CallbackHandler = None
 
-app = FastAPI(title="AI2.0 API", version="1.0.0")
+_docs_url = "/docs" if Config.ENABLE_API_DOCS else None
+_redoc_url = "/redoc" if Config.ENABLE_API_DOCS else None
+_openapi_url = "/openapi.json" if Config.ENABLE_API_DOCS else None
+
+app = FastAPI(
+    title="AI2.0 API",
+    version="1.0.0",
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+    openapi_url=_openapi_url,
+)
 app.include_router(config_router)
 graph = create_graph()
 
