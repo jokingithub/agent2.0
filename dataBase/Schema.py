@@ -20,11 +20,10 @@ class MemoryModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
-    app_id: str = ""                # 新增：应用隔离
+    app_id: str = ""
     session_id: str
-    timestamp: datetime = Field(default_factory=datetime.now)
-    role: str
-    content: str
+    messages: List[Dict[str, str]] = Field(default_factory=list)  # role/content/ts
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 class FileTypeModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)

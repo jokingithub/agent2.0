@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 import json
-from typing import Optional, List, Dict
-from datetime import datetime
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone
 from .database import Database
 from .CRUD import CRUD
 from .Schema import FileModel, MemoryModel, FileTypeModel, SessionModel
+
 
 
 class FileService:
@@ -13,21 +14,18 @@ class FileService:
         self.collection = "files"
 
     def get_file_info(self, file_id: str, app_id: str = None) -> Optional[Dict]:
-        """按主键查文件，可选 app_id 校验"""
         doc = self.crud.find_one(self.collection, {"_id": file_id})
         if doc and app_id and doc.get("app_id", "") != app_id:
-            return None  # app_id 不匹配，视为不存在
+            return None
         return doc
 
     def get_files_by_app(self, app_id: str) -> List[Dict]:
-        """获取某个 app 下的所有文件"""
         return self.crud.find_documents(self.collection, {"app_id": app_id})
 
     def save_file_info(self, file_info: FileModel) -> str:
         doc = file_info.model_dump(by_alias=True, exclude_none=True, exclude={'id'})
         doc["_id"] = file_info.file_id
 
-        # 先查询是否存在
         if hit := self.crud.find_one(self.collection, {"_id": file_info.file_id}):
             return hit["_id"]
 
@@ -46,31 +44,60 @@ class MemoryService:
         self.crud = CRUD(Database.get_session)
         self.collection = "memories"
 
-    def save_memory(self, session_id: str, role: str, content: str, app_id: str = ""):
-        doc = {
-            "app_id": app_id,
-            "session_id": session_id,
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat()
-        }
-        return self.crud.insert_document(self.collection, doc)
+    def append_message(self, session_id: str, role: str, content: str, app_id: str = ""):
+        """追加一条消息到该 session 的 memory 记录，不存在则创建"""
+        # [改动] 过滤空消息
+        if not content or not content.strip():
+            return None
 
-    def get_recent_memories(self, session_id: str, last_n: int = 10, app_id: str = None) -> List[Dict]:
         query = {"session_id": session_id}
         if app_id:
             query["app_id"] = app_id
-        mems = self.crud.find_documents(
-            self.collection,
-            query,
-            sort_by="timestamp",
-            ascending=False,
-            limit=last_n
-        )
-        return mems[::-1]
 
-    def delete_memories_by_session(self, session_id: str) -> int:
-        return self.crud.delete_document(self.collection, {"session_id": session_id})
+        msg = {
+            "role": role,
+            "content": content,
+            "ts": datetime.now(timezone.utc).isoformat()
+        }
+
+        doc = self.crud.find_one(self.collection, query)
+        if doc:
+            messages = doc.get("messages", [])
+            messages.append(msg)
+            return self.crud.update_document(
+                self.collection,
+                query,
+                {
+                    "messages": messages,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+            )
+        else:
+            return self.crud.insert_document(self.collection, {
+                "app_id": app_id,
+                "session_id": session_id,
+                "messages": [msg],
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
+
+    def get_recent_messages(self, session_id: str, last_n: int = 20, app_id: str = None) -> List[Dict[str, str]]:
+        """获取最近 N 条消息"""
+        query = {"session_id": session_id}
+        if app_id:
+            query["app_id"] = app_id
+
+        doc = self.crud.find_one(self.collection, query)
+        if not doc:
+            return []
+
+        messages = doc.get("messages", [])
+        return messages[-last_n:] if last_n else messages
+
+    # [改动] app_id 改为必传参数，避免误删跨 app 数据
+    def delete_memories_by_session(self, session_id: str, app_id: str) -> int:
+        query = {"session_id": session_id, "app_id": app_id}
+        return self.crud.delete_document(self.collection, query)
+
 
 
 class FileTypeService:
@@ -97,55 +124,141 @@ class SessionService:
         self.memory_service = MemoryService()
         self.file_service = FileService()
 
-    def get_session(self, session_id: str, app_id: str = None) -> Optional[SessionModel]:
+    # ------------------------
+    # 内部工具
+    # ------------------------
+    def _session_query(self, session_id: str, app_id: str = "") -> Dict[str, str]:
         query = {"session_id": session_id}
         if app_id:
             query["app_id"] = app_id
+        return query
+
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    # ------------------------
+    # 会话元数据
+    # ------------------------
+    def get_session(self, session_id: str, app_id: str = None) -> Optional[SessionModel]:
+        query = self._session_query(session_id, app_id or "")
         data = self.crud.find_one(self.collection, query)
         return SessionModel(**data) if data else None
 
+    def get_session_metadata(self, session_id: str, app_id: str = "") -> Optional[Dict]:
+        """返回 sessions 原始文档（包含扩展字段，如 updated_at/status/metadata）"""
+        query = self._session_query(session_id, app_id)
+        return self.crud.find_one(self.collection, query)
+
     def get_sessions_by_app(self, app_id: str) -> List[Dict]:
-        """获取某个 app 下的所有会话"""
         return self.crud.find_documents(self.collection, {"app_id": app_id})
 
+    def create_session(
+        self,
+        session_id: str,
+        app_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        status: str = "active",
+        upsert: bool = True,
+    ) -> str:
+        """
+        创建会话（如果已存在则按 upsert 决定是否更新）
+        """
+        query = self._session_query(session_id, app_id)
+        existing = self.crud.find_one(self.collection, query)
+        now = self._now_iso()
+
+        if existing:
+            if upsert:
+                patch = {
+                    "updated_at": now,
+                    "status": existing.get("status", status),
+                    "metadata": existing.get("metadata", metadata or {}),
+                }
+                self.crud.update_document(self.collection, query, patch)
+            return existing["_id"]
+
+        doc = {
+            "app_id": app_id,
+            "session_id": session_id,
+            "created_at": now,
+            "updated_at": now,
+            "status": status,
+            "metadata": metadata or {},
+            "file_list": [],
+        }
+        return self.crud.insert_document(self.collection, doc)
+
+    def ensure_session(self, session_id: str, app_id: str = "") -> str:
+        """
+        会话不存在则创建，存在则返回 id
+        """
+        query = self._session_query(session_id, app_id)
+        existing = self.crud.find_one(self.collection, query)
+        if existing:
+            return existing["_id"]
+        return self.create_session(session_id=session_id, app_id=app_id)
+
+    def touch_session(self, session_id: str, app_id: str = "", extra_patch: Optional[Dict[str, Any]] = None) -> int:
+        """
+        刷新会话活跃时间
+        """
+        query = self._session_query(session_id, app_id)
+        patch = {"updated_at": self._now_iso()}
+        if extra_patch:
+            patch.update(extra_patch)
+
+        count = self.crud.update_document(self.collection, query, patch)
+        if count == 0:
+            # 不存在则创建一个
+            self.create_session(session_id=session_id, app_id=app_id)
+            return 1
+        return count
+
+    # ------------------------
+    # 文件关联
+    # ------------------------
     def add_file_to_session(self, session_id: str, file_info: FileModel, app_id: str = ""):
+        # 先保存文件
         self.file_service.save_file_info(file_info)
-        session = self.get_session(session_id, app_id=app_id)
 
-        if session is None:
-            doc = {
-                "app_id": app_id,
-                "session_id": session_id,
-                "created_at": datetime.now().isoformat(),
-                "file_list": [file_info.file_id]
+        # 确保 session 存在
+        self.ensure_session(session_id, app_id=app_id)
+
+        query = self._session_query(session_id, app_id)
+        doc = self.crud.find_one(self.collection, query) or {}
+
+        current_list = doc.get("file_list", []) or []
+        if file_info.file_id not in current_list:
+            current_list.append(file_info.file_id)
+
+        self.crud.update_document(
+            self.collection,
+            query,
+            {
+                "file_list": current_list,
+                "updated_at": self._now_iso(),
             }
-            self.crud.insert_document(self.collection, doc)
-        else:
-            current_list = session.file_list or []
-            if file_info.file_id not in current_list:
-                current_list.append(file_info.file_id)
-                self.crud.update_document(
-                    self.collection,
-                    {"session_id": session_id},
-                    {"file_list": current_list}
-                )
-
+        )
         return file_info.file_id
 
-    def remove_file_from_session(self, session_id: str, file_id: str) -> int:
-        session = self.get_session(session_id)
-        if session is None or not session.file_list:
+    def remove_file_from_session(self, session_id: str, file_id: str, app_id: str = "") -> int:
+        query = self._session_query(session_id, app_id)
+        doc = self.crud.find_one(self.collection, query)
+        if not doc:
             return 0
 
-        current_list = session.file_list
+        current_list = doc.get("file_list", []) or []
         if file_id not in current_list:
             return 0
 
         current_list.remove(file_id)
         self.crud.update_document(
             self.collection,
-            {"session_id": session_id},
-            {"file_list": current_list}
+            query,
+            {
+                "file_list": current_list,
+                "updated_at": self._now_iso(),
+            }
         )
         return 1
 
@@ -161,24 +274,39 @@ class SessionService:
         else:
             target_ids = session.file_list
 
-        files_data = self.crud.find_documents(
-            "files",
-            {"_id": {"$in": target_ids}}
-        )
+        file_query: Dict[str, Any] = {"_id": {"$in": target_ids}}
+        if app_id:
+            file_query["app_id"] = app_id
+
+        files_data = self.crud.find_documents("files", file_query)
         return files_data
 
+    # ------------------------
+    # 对话相关（兼容旧调用）
+    # ------------------------
     def append_chat_message(self, session_id: str, role: str, content: str, app_id: str = ""):
-        return self.memory_service.save_memory(session_id, role, content, app_id=app_id)
+        """
+        兼容旧方法名：实际写 memories。
+        同时确保 session 存在并刷新 updated_at。
+        """
+        self.ensure_session(session_id, app_id=app_id)
+        ret = self.memory_service.append_message(session_id, role, content, app_id=app_id)
+        self.touch_session(session_id, app_id=app_id)
+        return ret
 
-    def get_full_context(self, session_id: str, last_n: int = 10, app_id: str = None) -> Dict:
-        history = self.memory_service.get_recent_memories(session_id, last_n, app_id=app_id)
+    def get_full_context(self, session_id: str, last_n: int = 20, app_id: str = None) -> Dict:
+        history = self.memory_service.get_recent_messages(session_id, last_n, app_id=app_id)
         files = self.get_session_files_content(session_id, app_id=app_id)
         return {
             "history": history,
             "files": files
         }
 
-    def delete_everything_about_session(self, session_id: str):
-        self.memory_service.delete_memories_by_session(session_id)
-        deleted_count = self.crud.delete_document(self.collection, {"session_id": session_id})
+    # ------------------------
+    # 删除
+    # ------------------------
+    def delete_everything_about_session(self, session_id: str, app_id: str):
+        self.memory_service.delete_memories_by_session(session_id, app_id=app_id)
+        query = {"session_id": session_id, "app_id": app_id}
+        deleted_count = self.crud.delete_document(self.collection, query)
         return deleted_count

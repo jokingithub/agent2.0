@@ -97,6 +97,9 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_sub_agents_name ON sub_agents ((data->>'name'));
                     CREATE INDEX IF NOT EXISTS idx_skills_name ON skills ((data->>'name'));
                     CREATE INDEX IF NOT EXISTS idx_scenes_scene_code ON scenes ((data->>'scene_code'));
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_app_session ON memories ((COALESCE(data->>'app_id','')), (data->>'session_id'));
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_app_session ON sessions ((COALESCE(data->>'app_id','')), (data->>'session_id'));
+
                 """))
                 conn.commit()
                 logger.info("PostgreSQL tables and indices ensured.")

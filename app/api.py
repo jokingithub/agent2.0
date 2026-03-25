@@ -18,6 +18,7 @@ from fileUpload.fileUpload import save_file
 from logger import logger
 from app.config_api import router as config_router
 from dataBase.ConfigService import ChatLogService
+from dataBase.Service import SessionService
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -81,8 +82,19 @@ async def _save_chat_log(
     request_time: datetime,
     langfuse_trace_id: str = "",
 ):
-    """异步保存会话日志（业务维度），技术细节交给 Langfuse"""
+    """异步保存会话日志（业务维度），同时写入 memory"""
     try:
+        # 写 memories 表
+        session_service = SessionService()
+        session_service.append_chat_message(session_id, "user", request_content, app_id=app_id)
+        if response_content:
+            session_service.append_chat_message(session_id, "assistant", response_content, app_id=app_id)
+        logger.info(f"会话记忆已保存: session={session_id}")
+    except Exception as e:
+        logger.error(f"保存会话记忆失败: {e}", exc_info=True)
+
+    try:
+        # 写 chat_logs 表
         log_service = ChatLogService()
         log_data = {
             "app_id": app_id,
@@ -98,19 +110,33 @@ async def _save_chat_log(
     except Exception as e:
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
 
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     request_time = datetime.now()
+    app_id = req.app_id or ""
 
     callbacks = []
     if CallbackHandler is not None:
         callbacks.append(CallbackHandler())
 
+    session_service = SessionService()
+
+    # 确保 session 存在（会话容器）
+    session_service.ensure_session(req.session_id, app_id=app_id)
+
+    # 读历史上下文
+    history = session_service.memory_service.get_recent_messages(
+        req.session_id, last_n=20, app_id=app_id
+    )
+
+    # 拼接：历史 + 当前消息
+    messages = [(msg["role"], msg["content"]) for msg in history]
+    messages.append(("user", req.message))
+
     inputs = {
         "session_id": req.session_id,
-        "app_id": req.app_id,
-        "messages": [("user", req.message)],
+        "app_id": app_id,
+        "messages": messages,
     }
 
     events: list[dict[str, Any]] = []
@@ -126,9 +152,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
     ):
         for node_name, node_value in output.items():
             event: dict[str, Any] = {"node": node_name}
-            messages = node_value.get("messages") if isinstance(node_value, dict) else None
-            if messages:
-                last = messages[-1]
+            node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
+            if node_messages:
+                last = node_messages[-1]
                 content = getattr(last, "content", "")
                 event["message"] = content
                 if isinstance(content, str) and content.strip():
@@ -138,7 +164,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # 提取 Langfuse trace_id，异步写入业务日志
     trace_id = _extract_langfuse_trace_id(callbacks)
     asyncio.create_task(_save_chat_log(
-        app_id=req.app_id,
+        app_id=app_id,
         scene_id=req.scene_id,
         session_id=req.session_id,
         request_content=req.message,
@@ -147,25 +173,41 @@ async def chat(req: ChatRequest) -> ChatResponse:
         langfuse_trace_id=trace_id,
     ))
 
+    # 刷新 session 活跃时间
+    session_service.touch_session(req.session_id, app_id=app_id)
+
     return ChatResponse(
         session_id=req.session_id,
         final_message=final_message,
         events=events,
     )
 
-
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     request_time = datetime.now()
+    app_id = req.app_id or ""
 
     callbacks = []
     if CallbackHandler is not None:
         callbacks.append(CallbackHandler())
 
+    session_service = SessionService()
+
+    # 确保 session 存在
+    session_service.ensure_session(req.session_id, app_id=app_id)
+
+    # 读历史上下文
+    history = session_service.memory_service.get_recent_messages(
+        req.session_id, last_n=20, app_id=app_id
+    )
+
+    messages = [(msg["role"], msg["content"]) for msg in history]
+    messages.append(("user", req.message))
+
     inputs = {
         "session_id": req.session_id,
-        "app_id": req.app_id,
-        "messages": [("user", req.message)],
+        "app_id": app_id,
+        "messages": messages,
     }
 
     async def event_gen():
@@ -181,9 +223,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         ):
             for node_name, node_value in output.items():
                 payload: dict[str, Any] = {"node": node_name}
-                messages = node_value.get("messages") if isinstance(node_value, dict) else None
-                if messages:
-                    last = messages[-1]
+                node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
+                if node_messages:
+                    last = node_messages[-1]
                     content = getattr(last, "content", "")
                     payload["message"] = content
                     if isinstance(content, str) and content.strip():
@@ -193,7 +235,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # 流结束后异步写入业务日志
         trace_id = _extract_langfuse_trace_id(callbacks)
         asyncio.create_task(_save_chat_log(
-            app_id=req.app_id,
+            app_id=app_id,
             scene_id=req.scene_id,
             session_id=req.session_id,
             request_content=req.message,
@@ -201,6 +243,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             request_time=request_time,
             langfuse_trace_id=trace_id,
         ))
+
+        # 刷新 session 活跃时间
+        session_service.touch_session(req.session_id, app_id=app_id)
 
         done_payload = {
             "session_id": req.session_id,
