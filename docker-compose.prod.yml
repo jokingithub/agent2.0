@@ -1,0 +1,31 @@
+# 生产环境覆盖配置：关闭不必要宿主机端口暴露
+# 用法：
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  # 生产通常不对宿主机暴露数据库端口
+  pgsql:
+    ports: []
+
+  # 生产通常不对外暴露 langfuse（如需内部访问可走反向代理）
+  langfuse:
+    ports: []
+
+  # 网关作为唯一外部入口，保留 9000
+  gateway:
+    environment:
+      - APP_ENV=production
+      - ENABLE_API_DOCS=false
+
+  # main-app 仅供网关/内部服务访问，不对宿主机暴露
+  main-app:
+    ports: []
+    environment:
+      - APP_ENV=production
+      - ENABLE_API_DOCS=false
+
+  # mcp-service 如仅内部调用，可不暴露宿主机端口
+  mcp-service:
+    ports: []
+    environment:
+      - APP_ENV=production

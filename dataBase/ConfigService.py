@@ -133,6 +133,34 @@ class ToolService(BaseConfigService):
             self.collection, {"_id": {"$in": tool_ids}}
         )
 
+    def get_by_name_and_url(self, name: str, tool_type: str, url: str) -> Optional[Dict]:
+        return self.crud.find_one(
+            self.collection,
+            {"name": name, "type": tool_type, "url": url}
+        )
+
+    def upsert_mcp_tool(self, tool_data: Dict) -> str:
+        """按 (name, type, url) 进行幂等同步，适用于 MCP 服务端自动注册工具。"""
+        name = tool_data.get("name")
+        tool_type = tool_data.get("type", "mcp")
+        url = tool_data.get("url", "")
+
+        if not name:
+            raise ValueError("tool_data.name 不能为空")
+
+        existed = self.get_by_name_and_url(name=name, tool_type=tool_type, url=url)
+
+        if existed:
+            update_data = dict(tool_data)
+            update_data.pop("_id", None)
+            # 避免覆盖历史创建时间
+            update_data.pop("created_at", None)
+            self.update(existed["_id"], update_data)
+            return existed["_id"]
+
+        model = ToolModel(**tool_data)
+        return self.create(model)
+
 
 class ChatLogService(BaseConfigService):
     collection = "chat_logs"

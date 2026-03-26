@@ -45,6 +45,8 @@ services:
       - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-change-me-nextauth-secret}
       - SALT=${LANGFUSE_SALT:-change-me-langfuse-salt}
       - TELEMETRY_ENABLED=false
+      - LANGFUSE_INIT_USER_EMAIL=ricelink@ricelink.cn
+      - LANGFUSE_INIT_USER_PASSWORD=Ricelink2026
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -61,6 +63,8 @@ services:
       - "9000:9000"
     environment:
       - PYTHONUNBUFFERED=1
+      - APP_ENV=${APP_ENV:-debug}
+      - ENABLE_API_DOCS=${ENABLE_API_DOCS:-true}
       - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
       - BACKEND_BASE_URL=${BACKEND_BASE_URL:-http://main-app:8000}
     command: uvicorn gateway.main:app --host 0.0.0.0 --port 9000
@@ -69,6 +73,29 @@ services:
         condition: service_healthy
       main-app:
         condition: service_started
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+
+  mcp-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
+    container_name: mcp-service
+    ports:
+      - "9001:9001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
+      - MCP_TRANSPORT=${MCP_TRANSPORT:-streamable-http}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=9001
+    command: python mcp-service/mcp-service.py
+    depends_on:
+      pgsql:
+        condition: service_healthy
     volumes:
       - ./:/app
     restart: unless-stopped
@@ -106,6 +133,8 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - APP_ENV=${APP_ENV:-debug}
+      - ENABLE_API_DOCS=${ENABLE_API_DOCS:-true}
       - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}
       - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://host.docker.internal:8001}
       - USE_OCR_SERVICE=true
