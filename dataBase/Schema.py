@@ -88,6 +88,7 @@ class GatewayAppModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
+    app_name: str
     app_id: str
     auth_token: str
     available_scenes: List[Dict[str, Any]] = Field(default_factory=list, description="""

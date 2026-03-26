@@ -3,7 +3,9 @@
 # time: 2026/3/10
 
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
+from datetime import datetime, timezone
+from langchain_core.callbacks import BaseCallbackHandler
 
 class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话 ID")
@@ -26,3 +28,126 @@ class UploadResponse(BaseModel):
     file_type: Optional[list[str]] = "未知"
     content_preview: Optional[str] = ""
     message: str = "处理完成"
+
+class GatewayAppCreateRequest(BaseModel):
+    app_name: str = Field(..., description="应用名称")
+    available_scenes: List[Dict[str, Any]] = Field(default_factory=list, description="可用场景及功能")
+    description: str = Field(default=None,description="描述")
+
+
+class ModelConnectionCreateRequest(BaseModel):
+    protocol: str = Field(..., description="渠道协议，如 openai / deepseek / aliyun")
+    base_url: str = Field(..., description="模型服务基础地址")
+    api_key: str = Field(..., description="模型服务密钥")
+    description: Optional[str] = Field(default=None, description="连接描述")
+
+
+class ModelConnectionUpdateRequest(BaseModel):
+    protocol: Optional[str] = Field(default=None, description="渠道协议")
+    base_url: Optional[str] = Field(default=None, description="模型服务基础地址")
+    api_key: Optional[str] = Field(default=None, description="模型服务密钥")
+    description: Optional[str] = Field(default=None, description="连接描述")
+    models: Optional[List[str]] = Field(default=None, description="可选：手工覆盖模型列表；不传则按连接信息自动刷新")
+
+
+
+class MCPToolSyncRequest(BaseModel):
+    url: Optional[str] = Field(default=None, description="MCP SSE地址，如 http://127.0.0.1:9001/sse")
+    default_category: str = Field(default="mcp", description="当远端工具未提供分类时使用的默认分类")
+    dry_run: bool = Field(default=False, description="仅预览，不写入数据库")
+    prune_missing: bool = Field(default=False, description="是否自动下线远端已不存在的本地MCP工具")
+
+
+
+# ============================================================
+# Token & 耗时 收集器
+# ============================================================
+
+class UsageCollector(BaseCallbackHandler):
+    """
+    收集每次 LLM 调用的 token + 模型 + agent(node)
+    """
+    def __init__(self):
+        super().__init__()
+        self.total_tokens: int = 0
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.first_token_time: Optional[datetime] = None
+
+        self.call_details: list[dict[str, Any]] = []
+        self._seq: int = 0
+        self._current_model: str = "unknown"
+        self._current_agent: str = "unknown"
+
+    def on_llm_start(self, serialized, prompts=None, *, invocation_params=None, **kwargs):
+        if self.first_token_time is None:
+            self.first_token_time = datetime.now(timezone.utc)
+
+        self._seq += 1
+
+        # 1) model 名
+        model_name = None
+        if invocation_params:
+            model_name = invocation_params.get("model") or invocation_params.get("model_name")
+        if not model_name and serialized:
+            kw = serialized.get("kwargs", {}) if isinstance(serialized, dict) else {}
+            model_name = kw.get("model") or kw.get("model_name")
+        self._current_model = model_name or "unknown"
+
+        # 2) agent 名（LangGraph 注入）
+        metadata = kwargs.get("metadata", {}) or {}
+        self._current_agent = metadata.get("langgraph_node", "unknown")
+
+    def on_llm_end(self, response, **kwargs):
+        call_prompt = 0
+        call_completion = 0
+        call_total = 0
+
+        # 优先 llm_output
+        try:
+            if response and hasattr(response, "llm_output") and response.llm_output:
+                usage = response.llm_output.get("token_usage") or response.llm_output.get("usage") or {}
+                call_total = usage.get("total_tokens", 0) or 0
+                call_prompt = usage.get("prompt_tokens", 0) or 0
+                call_completion = usage.get("completion_tokens", 0) or 0
+        except Exception:
+            pass
+
+        # 兜底 generations
+        if call_total == 0:
+            try:
+                if response and hasattr(response, "generations"):
+                    for gen_list in response.generations:
+                        for gen in gen_list:
+                            info = getattr(gen, "generation_info", None) or {}
+                            usage = info.get("token_usage") or info.get("usage") or {}
+                            call_total += usage.get("total_tokens", 0) or 0
+                            call_prompt += usage.get("prompt_tokens", 0) or 0
+                            call_completion += usage.get("completion_tokens", 0) or 0
+            except Exception:
+                pass
+
+        self.total_tokens += call_total
+        self.prompt_tokens += call_prompt
+        self.completion_tokens += call_completion
+
+        self.call_details.append({
+            "seq": self._seq,
+            "agent": self._current_agent,   # 你要的字段
+            "model": self._current_model,
+            "prompt_tokens": call_prompt,
+            "completion_tokens": call_completion,
+            "total_tokens": call_total,
+        })
+
+    @property
+    def final_model(self) -> Optional[str]:
+        if not self.call_details:
+            return None
+        return self.call_details[-1].get("model")
+
+    @property
+    def final_agent(self) -> Optional[str]:
+        if not self.call_details:
+            return None
+        return self.call_details[-1].get("agent")

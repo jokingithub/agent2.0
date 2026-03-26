@@ -45,6 +45,8 @@ services:
       - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-change-me-nextauth-secret}
       - SALT=${LANGFUSE_SALT:-change-me-langfuse-salt}
       - TELEMETRY_ENABLED=false
+      - LANGFUSE_INIT_USER_EMAIL=ricelink@ricelink.cn
+      - LANGFUSE_INIT_USER_PASSWORD=Ricelink2026
     depends_on:
       langfuse-db:
         condition: service_healthy

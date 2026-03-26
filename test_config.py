@@ -527,25 +527,27 @@ if __name__ == "__main__":
     print("📦 9. 外部调用配置 (gateway_apps) - token自动生成")
     print(f"{'='*60}")
 
-    pause("准备创建外部调用配置（只传 app_id + available_scenes，token 自动生成）")
+    pause("准备创建外部调用配置（只传 app_name + available_scenes，app_id/token 自动生成）")
 
     r = test("创建外部调用配置-ERP系统", "POST", f"{BASE_URL}/gateway-apps", 200, {
-        "app_id": "erp_system",
+        "app_name": "ERP系统",
         "available_scenes": [
             {"scene_code": "quotation", "features": ["chat", "upload", "report"]},
             {"scene_code": "review", "features": ["chat", "upload"]}
         ]
     })
     app_config_id = r["id"] if r else None
+    auto_app_id = r["app_id"] if r else None
     auto_token = r["auth_token"] if r else None
 
     if auto_token:
+        print(f"\n  📝 自动生成的 app_id: {auto_app_id}")
         print(f"\n  📝 自动生成的 auth_token: {auto_token}")
 
     pause("gateway_apps 表应该有 1 条，auth_token 是自动生成的随机字符串")
 
     r2 = test("创建外部调用配置-小程序", "POST", f"{BASE_URL}/gateway-apps", 200, {
-        "app_id": "mini_program",
+        "app_name": "小程序",
         "available_scenes": [
             {"scene_code": "quotation", "features": ["chat"]}
         ]
@@ -556,13 +558,13 @@ if __name__ == "__main__":
     test("查询所有外部调用配置", "GET", f"{BASE_URL}/gateway-apps", 200)
 
     # 鉴权验证
-    if auto_token:
+        if auto_token and auto_app_id:
         print("\n  🔐 鉴权验证")
         test("鉴权验证-正确token", "POST",
-             f"{BASE_URL}/gateway-apps/validate?app_id=erp_system&token={auto_token}", 200)
+               f"{BASE_URL}/gateway-apps/validate?app_id={auto_app_id}&token={auto_token}", 200)
 
         test("鉴权验证-错误token", "POST",
-             f"{BASE_URL}/gateway-apps/validate?app_id=erp_system&token=wrong-token", 200)
+               f"{BASE_URL}/gateway-apps/validate?app_id={auto_app_id}&token=wrong-token", 200)
 
         pause("第一个应该返回 valid:true，第二个 valid:false")
 

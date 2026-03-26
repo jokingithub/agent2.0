@@ -11,10 +11,8 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from langchain_core.callbacks import BaseCallbackHandler
-
 from app.graph.builder import create_graph
-from app.Schema import ChatRequest, ChatResponse, UploadResponse
+from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
 from fileUpload.fileUpload import save_file
 from logger import logger
 from config import Config
@@ -41,99 +39,6 @@ app = FastAPI(
 app.include_router(config_router)
 graph = create_graph()
 
-
-# ============================================================
-# Token & 耗时 收集器
-# ============================================================
-
-class UsageCollector(BaseCallbackHandler):
-    """
-    收集每次 LLM 调用的 token + 模型 + agent(node)
-    """
-    def __init__(self):
-        super().__init__()
-        self.total_tokens: int = 0
-        self.prompt_tokens: int = 0
-        self.completion_tokens: int = 0
-        self.first_token_time: Optional[datetime] = None
-
-        self.call_details: list[dict[str, Any]] = []
-        self._seq: int = 0
-        self._current_model: str = "unknown"
-        self._current_agent: str = "unknown"
-
-    def on_llm_start(self, serialized, prompts=None, *, invocation_params=None, **kwargs):
-        if self.first_token_time is None:
-            self.first_token_time = datetime.now(timezone.utc)
-
-        self._seq += 1
-
-        # 1) model 名
-        model_name = None
-        if invocation_params:
-            model_name = invocation_params.get("model") or invocation_params.get("model_name")
-        if not model_name and serialized:
-            kw = serialized.get("kwargs", {}) if isinstance(serialized, dict) else {}
-            model_name = kw.get("model") or kw.get("model_name")
-        self._current_model = model_name or "unknown"
-
-        # 2) agent 名（LangGraph 注入）
-        metadata = kwargs.get("metadata", {}) or {}
-        self._current_agent = metadata.get("langgraph_node", "unknown")
-
-    def on_llm_end(self, response, **kwargs):
-        call_prompt = 0
-        call_completion = 0
-        call_total = 0
-
-        # 优先 llm_output
-        try:
-            if response and hasattr(response, "llm_output") and response.llm_output:
-                usage = response.llm_output.get("token_usage") or response.llm_output.get("usage") or {}
-                call_total = usage.get("total_tokens", 0) or 0
-                call_prompt = usage.get("prompt_tokens", 0) or 0
-                call_completion = usage.get("completion_tokens", 0) or 0
-        except Exception:
-            pass
-
-        # 兜底 generations
-        if call_total == 0:
-            try:
-                if response and hasattr(response, "generations"):
-                    for gen_list in response.generations:
-                        for gen in gen_list:
-                            info = getattr(gen, "generation_info", None) or {}
-                            usage = info.get("token_usage") or info.get("usage") or {}
-                            call_total += usage.get("total_tokens", 0) or 0
-                            call_prompt += usage.get("prompt_tokens", 0) or 0
-                            call_completion += usage.get("completion_tokens", 0) or 0
-            except Exception:
-                pass
-
-        self.total_tokens += call_total
-        self.prompt_tokens += call_prompt
-        self.completion_tokens += call_completion
-
-        self.call_details.append({
-            "seq": self._seq,
-            "agent": self._current_agent,   # 你要的字段
-            "model": self._current_model,
-            "prompt_tokens": call_prompt,
-            "completion_tokens": call_completion,
-            "total_tokens": call_total,
-        })
-
-    @property
-    def final_model(self) -> Optional[str]:
-        if not self.call_details:
-            return None
-        return self.call_details[-1].get("model")
-
-    @property
-    def final_agent(self) -> Optional[str]:
-        if not self.call_details:
-            return None
-        return self.call_details[-1].get("agent")
 
 
 # ============================================================
