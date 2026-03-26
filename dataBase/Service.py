@@ -45,13 +45,13 @@ class MemoryService:
         self.collection = "memories"
 
     def append_message(
-    self,
-    session_id: str,
-    role: str,
-    content: str,
-    app_id: str = "",
-    model_name: str = "",
-    agent_name: str = "",
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        app_id: str = "",
+        model_name: str = "",
+        agent_name: str = "",
     ):
         """追加一条消息到该 session 的 memory 记录，不存在则创建"""
         if not content or not content.strip():
@@ -66,11 +66,10 @@ class MemoryService:
             "content": content,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        # ===== 新增：记录模型名 =====
         if model_name:
             msg["model"] = model_name
         if agent_name:
-            msg["agent"] = agent_name   # 新增
+            msg["agent"] = agent_name
 
         doc = self.crud.find_one(self.collection, query)
         if doc:
@@ -105,7 +104,38 @@ class MemoryService:
         messages = doc.get("messages", [])
         return messages[-last_n:] if last_n else messages
 
-    # [改动] app_id 改为必传参数，避免误删跨 app 数据
+    def get_memory_doc(self, session_id: str, app_id: str = "") -> Optional[Dict]:
+        """返回完整 memory 文档（含 _id, updated_at 等元信息）"""
+        query = {"session_id": session_id}
+        if app_id:
+            query["app_id"] = app_id
+        return self.crud.find_one(self.collection, query)
+
+    def update_messages(self, session_id: str, messages: List[Dict[str, Any]], app_id: str = "") -> int:
+        """整体替换消息列表（用于编辑/修正历史）"""
+        query = {"session_id": session_id}
+        if app_id:
+            query["app_id"] = app_id
+
+        doc = self.crud.find_one(self.collection, query)
+        if doc:
+            return self.crud.update_document(
+                self.collection,
+                query,
+                {
+                    "messages": messages,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+            )
+        else:
+            # 不存在则创建
+            return self.crud.insert_document(self.collection, {
+                "app_id": app_id,
+                "session_id": session_id,
+                "messages": messages,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
+
     def delete_memories_by_session(self, session_id: str, app_id: str) -> int:
         query = {"session_id": session_id, "app_id": app_id}
         return self.crud.delete_document(self.collection, query)
@@ -172,9 +202,6 @@ class SessionService:
         status: str = "active",
         upsert: bool = True,
     ) -> str:
-        """
-        创建会话（如果已存在则按 upsert 决定是否更新）
-        """
         query = self._session_query(session_id, app_id)
         existing = self.crud.find_one(self.collection, query)
         now = self._now_iso()
@@ -201,9 +228,6 @@ class SessionService:
         return self.crud.insert_document(self.collection, doc)
 
     def ensure_session(self, session_id: str, app_id: str = "") -> str:
-        """
-        会话不存在则创建，存在则返回 id
-        """
         query = self._session_query(session_id, app_id)
         existing = self.crud.find_one(self.collection, query)
         if existing:
@@ -211,9 +235,6 @@ class SessionService:
         return self.create_session(session_id=session_id, app_id=app_id)
 
     def touch_session(self, session_id: str, app_id: str = "", extra_patch: Optional[Dict[str, Any]] = None) -> int:
-        """
-        刷新会话活跃时间
-        """
         query = self._session_query(session_id, app_id)
         patch = {"updated_at": self._now_iso()}
         if extra_patch:
@@ -221,10 +242,20 @@ class SessionService:
 
         count = self.crud.update_document(self.collection, query, patch)
         if count == 0:
-            # 不存在则创建一个
             self.create_session(session_id=session_id, app_id=app_id)
             return 1
         return count
+
+    def update_session(self, session_id: str, app_id: str = "", **kwargs) -> int:
+        """更新会话的任意字段（status, metadata 等）"""
+        query = self._session_query(session_id, app_id)
+        patch = {"updated_at": self._now_iso()}
+        # 只接受合法字段
+        allowed = {"status", "metadata"}
+        for k, v in kwargs.items():
+            if k in allowed and v is not None:
+                patch[k] = v
+        return self.crud.update_document(self.collection, query, patch)
 
     # ------------------------
     # 文件关联
@@ -252,6 +283,37 @@ class SessionService:
             }
         )
         return file_info.file_id
+
+    def mount_file_to_session(self, session_id: str, file_id: str, app_id: str = "") -> bool:
+        """
+        轻量版：只把已存在的 file_id 挂载到 session 的 file_list。
+        不重复保存文件（文件已通过 /upload 存在）。
+        返回 True 表示新挂载，False 表示已存在或 file 不存在。
+        """
+        # 校验文件存在
+        file_doc = self.file_service.get_file_info(file_id, app_id=app_id)
+        if not file_doc:
+            return False
+
+        self.ensure_session(session_id, app_id=app_id)
+
+        query = self._session_query(session_id, app_id)
+        doc = self.crud.find_one(self.collection, query) or {}
+
+        current_list = doc.get("file_list", []) or []
+        if file_id in current_list:
+            return False  # 已挂载
+
+        current_list.append(file_id)
+        self.crud.update_document(
+            self.collection,
+            query,
+            {
+                "file_list": current_list,
+                "updated_at": self._now_iso(),
+            }
+        )
+        return True
 
     def remove_file_from_session(self, session_id: str, file_id: str, app_id: str = "") -> int:
         query = self._session_query(session_id, app_id)
@@ -303,14 +365,14 @@ class SessionService:
         content: str,
         app_id: str = "",
         model_name: str = "",
-        agent_name: str = "",   # 新增
+        agent_name: str = "",
     ):
         self.ensure_session(session_id, app_id=app_id)
         ret = self.memory_service.append_message(
             session_id, role, content,
             app_id=app_id,
             model_name=model_name,
-            agent_name=agent_name,   # 新增
+            agent_name=agent_name,
         )
         self.touch_session(session_id, app_id=app_id)
         return ret

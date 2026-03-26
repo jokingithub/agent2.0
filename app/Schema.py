@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Any, List, Dict
 from datetime import datetime, timezone
 from langchain_core.callbacks import BaseCallbackHandler
+from typing import Optional, List, Dict, Any
 
 class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话 ID")
@@ -151,3 +152,35 @@ class UsageCollector(BaseCallbackHandler):
         if not self.call_details:
             return None
         return self.call_details[-1].get("agent")
+# ============================================================
+# Session & Memory 管理接口请求模型
+# ============================================================
+
+class CreateSessionRequest(BaseModel):
+    """创建会话"""
+    session_id: str = Field(..., description="会话ID")
+    app_id: str = Field("", description="应用ID")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="会话元数据")
+    status: str = Field("active", description="会话状态")
+
+
+class UpdateSessionRequest(BaseModel):
+    """更新会话"""
+    app_id: str = Field("", description="应用ID（用于定位）")
+    status: Optional[str] = Field(None, description="会话状态")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="会话元数据")
+
+
+class AppendMessageRequest(BaseModel):
+    """追加消息到记忆"""
+    app_id: str = Field("", description="应用ID")
+    role: str = Field(..., description="角色: user / assistant / system")
+    content: str = Field(..., description="消息内容")
+    model_name: str = Field("", description="模型名（assistant 消息时记录）")
+    agent_name: str = Field("", description="Agent名（assistant 消息时记录）")
+
+
+class ReplaceMessagesRequest(BaseModel):
+    """替换整个消息列表"""
+    app_id: str = Field("", description="应用ID")
+    messages: List[Dict[str, Any]] = Field(..., description="完整消息列表")

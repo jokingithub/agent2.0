@@ -17,6 +17,7 @@ from fileUpload.fileUpload import save_file
 from logger import logger
 from config import Config
 from app.config_api import router as config_router
+from app.session_api import router as session_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
 
@@ -37,6 +38,7 @@ app = FastAPI(
     openapi_url=_openapi_url,
 )
 app.include_router(config_router)
+app.include_router(session_router)
 graph = create_graph()
 
 
@@ -157,6 +159,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     inputs = {
         "session_id": req.session_id,
         "app_id": app_id,
+        "scene_id": req.scene_id or "default",
         "messages": messages,
     }
 
@@ -226,6 +229,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     inputs = {
         "session_id": req.session_id,
         "app_id": app_id,
+        "scene_id": req.scene_id or "default",
         "messages": messages,
     }
 

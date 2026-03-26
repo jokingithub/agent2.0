@@ -8,11 +8,12 @@ class FileModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
-    app_id: str = ""                # 新增：应用隔离
+    app_id: str = ""
     file_id: str
     file_name: str
     file_type: List[str]
     content: str
+    file_path: Optional[str] = None   # 新增：持久化文件路径
     main_info: Optional[Dict[str, Any]] = None
     upload_time: datetime = Field(default_factory=datetime.now)
 

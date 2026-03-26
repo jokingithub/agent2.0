@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
 """通用Agent工厂 - 从配置表动态创建Agent节点"""
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage
 from app.core.llm import get_model, get_model_by_level_id
 from app.tools.factory import load_tools_for_sub_agent, load_skill_as_tool
 from dataBase.ConfigService import SubAgentService
@@ -10,8 +12,9 @@ from logger import logger
 _sub_agent_service = SubAgentService()
 _ROOT = Path(__file__).resolve().parents[2]
 
-# 本地skills缓存（保留现有的本地技能）
+# 本地skills缓存
 _LOCAL_SKILLS = {}
+
 
 def _get_local_skill(skill_name: str):
     """加载本地skill目录的工具"""
@@ -29,7 +32,7 @@ def _get_local_skill(skill_name: str):
 def create_agent_from_config(sub_agent_id: str):
     """
     从sub_agents表读配置，动态创建Agent。
-    返回一个可调用的agent chain。
+    返回 (agent_chain, tools) 或 None。
     """
     config = _sub_agent_service.get_by_id(sub_agent_id)
     if not config:
@@ -65,17 +68,17 @@ def create_agent_from_config(sub_agent_id: str):
 
 def generic_agent_node(sub_agent_id: str):
     """
-    返回一个node函数，供graph调用。
-    闭包捕获sub_agent_id。
+    返回一个 node 函数，供 graph 调用。
+    闭包捕获 sub_agent_id。
     """
     def node_fn(state):
         result = create_agent_from_config(sub_agent_id)
         if result is None:
-            #兜底：直接返回错误信息
-            from langchain_core.messages import AIMessage
             return {
                 "messages": [AIMessage(content=f"Agent '{sub_agent_id}' 配置不存在")],
                 "session_id": state.get("session_id", "default"),
+                "app_id": state.get("app_id", ""),
+                "scene_id": state.get("scene_id", "default"),
             }
 
         agent, tools = result
@@ -83,6 +86,8 @@ def generic_agent_node(sub_agent_id: str):
         return {
             "messages": [response],
             "session_id": state.get("session_id", "default"),
+            "app_id": state.get("app_id", ""),
+            "scene_id": state.get("scene_id", "default"),
         }
 
     return node_fn
