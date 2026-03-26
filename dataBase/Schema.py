@@ -22,7 +22,7 @@ class MemoryModel(BaseModel):
     id: Optional[Any] = Field(alias="_id", default=None)
     app_id: str = ""
     session_id: str
-    messages: List[Dict[str, str]] = Field(default_factory=list)  # role/content/ts
+    messages: List[Dict[str, Any]] = Field(default_factory=list)  # 改 str → Any，支持 model 字段
     updated_at: datetime = Field(default_factory=datetime.now)
 
 class FileTypeModel(BaseModel):
@@ -158,7 +158,7 @@ class ToolModel(BaseModel):
 
 
 class ChatLogModel(BaseModel):
-    """会话日志（业务维度，技术细节交给 Langfuse，这里作为备份）"""
+    """会话日志"""
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[Any] = Field(alias="_id", default=None)
@@ -167,15 +167,24 @@ class ChatLogModel(BaseModel):
     session_id: str = ""
     request_content: str = ""
     response_content: str = ""
-    langfuse_trace_id: str = ""
     # 耗时
-    request_time: Optional[str] = None       # 请求发起时间
-    first_token_time: Optional[str] = None   # 开始返回时间（首token）
-    end_time: Optional[str] = None           # 结束返回时间
+    request_time: Optional[str] = None
+    first_token_time: Optional[str] = None
+    end_time: Optional[str] = None
     # token消耗
     total_tokens: Optional[int] = None
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
+    # ===== 新增：模型追踪 =====
+    model_detail: Optional[List[Dict[str, Any]]] = Field(default=None, description="""
+        每次LLM调用的详细记录，例如:
+        [
+            {"seq": 1, "node": "supervisor", "model": "gpt-4o", "prompt_tokens": 120, "completion_tokens": 30},
+            {"seq": 2, "node": "quotation", "model": "deepseek-v3", "prompt_tokens": 200, "completion_tokens": 80}
+        ]
+    """)
+    final_model: Optional[str] = Field(default=None, description="最后一次LLM调用的模型名")
+
 
 
 

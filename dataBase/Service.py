@@ -44,9 +44,16 @@ class MemoryService:
         self.crud = CRUD(Database.get_session)
         self.collection = "memories"
 
-    def append_message(self, session_id: str, role: str, content: str, app_id: str = ""):
+    def append_message(
+    self,
+    session_id: str,
+    role: str,
+    content: str,
+    app_id: str = "",
+    model_name: str = "",
+    agent_name: str = "",
+    ):
         """追加一条消息到该 session 的 memory 记录，不存在则创建"""
-        # [改动] 过滤空消息
         if not content or not content.strip():
             return None
 
@@ -54,11 +61,16 @@ class MemoryService:
         if app_id:
             query["app_id"] = app_id
 
-        msg = {
+        msg: Dict[str, Any] = {
             "role": role,
             "content": content,
-            "ts": datetime.now(timezone.utc).isoformat()
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
+        # ===== 新增：记录模型名 =====
+        if model_name:
+            msg["model"] = model_name
+        if agent_name:
+            msg["agent"] = agent_name   # 新增
 
         doc = self.crud.find_one(self.collection, query)
         if doc:
@@ -284,15 +296,25 @@ class SessionService:
     # ------------------------
     # 对话相关（兼容旧调用）
     # ------------------------
-    def append_chat_message(self, session_id: str, role: str, content: str, app_id: str = ""):
-        """
-        兼容旧方法名：实际写 memories。
-        同时确保 session 存在并刷新 updated_at。
-        """
+    def append_chat_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        app_id: str = "",
+        model_name: str = "",
+        agent_name: str = "",   # 新增
+    ):
         self.ensure_session(session_id, app_id=app_id)
-        ret = self.memory_service.append_message(session_id, role, content, app_id=app_id)
+        ret = self.memory_service.append_message(
+            session_id, role, content,
+            app_id=app_id,
+            model_name=model_name,
+            agent_name=agent_name,   # 新增
+        )
         self.touch_session(session_id, app_id=app_id)
         return ret
+
 
     def get_full_context(self, session_id: str, last_n: int = 20, app_id: str = None) -> Dict:
         history = self.memory_service.get_recent_messages(session_id, last_n, app_id=app_id)

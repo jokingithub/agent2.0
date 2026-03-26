@@ -166,16 +166,39 @@ class ChatLogService(BaseConfigService):
     collection = "chat_logs"
     model_class = ChatLogModel
 
+    # 可选：覆盖 create，不自动塞 created_at/updated_at，保持日志字段纯净
+    def create(self, data) -> str:
+        doc = data.model_dump(by_alias=True, exclude_none=True)
+        return self.crud.insert_document(self.collection, doc)
+
     def log(self, data: ChatLogModel) -> str:
         return self.create(data)
 
     async def save_log_async(self, log_data: dict):
         """异步保存日志，不阻塞主流程"""
         try:
-            log_model = ChatLogModel(**log_data)
+            allowed_keys = {
+                "app_id",
+                "scene_id",
+                "session_id",
+                "request_content",
+                "response_content",
+                "request_time",
+                "first_token_time",
+                "end_time",
+                "total_tokens",
+                "prompt_tokens",
+                "completion_tokens",
+                # ===== 新增 =====
+                "model_detail",
+                "final_model",
+            }
+            clean_data = {k: v for k, v in log_data.items() if k in allowed_keys}
+            log_model = ChatLogModel(**clean_data)
             self.create(log_model)
         except Exception as e:
             logger.error(f"保存会话日志失败: {e}", exc_info=True)
+
 
     def get_by_session(self, session_id: str) -> List[Dict]:
         return self.crud.find_documents(
@@ -194,15 +217,6 @@ class ChatLogService(BaseConfigService):
             limit=limit
         )
 
-
-    def get_by_app(self, app_id: str, limit: int = 100) -> List[Dict]:
-        return self.crud.find_documents(
-            self.collection,
-            {"app_id": app_id},
-            sort_by="request_time",
-            ascending=False,
-            limit=limit
-        )
 
 
 # ============================================================
