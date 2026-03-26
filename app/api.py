@@ -32,10 +32,8 @@ graph = create_graph()
 
 class UsageCollector(BaseCallbackHandler):
     """
-    轻量回调：收集所有 LLM 调用的 token 用量，
-    并记录首次 LLM 开始输出的时间。
+    收集每次 LLM 调用的 token + 模型 + agent(node)
     """
-
     def __init__(self):
         super().__init__()
         self.total_tokens: int = 0
@@ -43,36 +41,83 @@ class UsageCollector(BaseCallbackHandler):
         self.completion_tokens: int = 0
         self.first_token_time: Optional[datetime] = None
 
-    def on_llm_start(self, *args, **kwargs):
-        """LLM 开始调用时，记录首次时间"""
+        self.call_details: list[dict[str, Any]] = []
+        self._seq: int = 0
+        self._current_model: str = "unknown"
+        self._current_agent: str = "unknown"
+
+    def on_llm_start(self, serialized, prompts=None, *, invocation_params=None, **kwargs):
         if self.first_token_time is None:
             self.first_token_time = datetime.now(timezone.utc)
 
+        self._seq += 1
+
+        # 1) model 名
+        model_name = None
+        if invocation_params:
+            model_name = invocation_params.get("model") or invocation_params.get("model_name")
+        if not model_name and serialized:
+            kw = serialized.get("kwargs", {}) if isinstance(serialized, dict) else {}
+            model_name = kw.get("model") or kw.get("model_name")
+        self._current_model = model_name or "unknown"
+
+        # 2) agent 名（LangGraph 注入）
+        metadata = kwargs.get("metadata", {}) or {}
+        self._current_agent = metadata.get("langgraph_node", "unknown")
+
     def on_llm_end(self, response, **kwargs):
-        """LLM 调用结束，累加 token 用量"""
+        call_prompt = 0
+        call_completion = 0
+        call_total = 0
+
+        # 优先 llm_output
         try:
             if response and hasattr(response, "llm_output") and response.llm_output:
                 usage = response.llm_output.get("token_usage") or response.llm_output.get("usage") or {}
-                self.total_tokens += usage.get("total_tokens", 0)
-                self.prompt_tokens += usage.get("prompt_tokens", 0)
-                self.completion_tokens += usage.get("completion_tokens", 0)
+                call_total = usage.get("total_tokens", 0) or 0
+                call_prompt = usage.get("prompt_tokens", 0) or 0
+                call_completion = usage.get("completion_tokens", 0) or 0
         except Exception:
             pass
 
-        # 有些模型在 generations 里带 usage
-        try:
-            if response and hasattr(response, "generations"):
-                for gen_list in response.generations:
-                    for gen in gen_list:
-                        info = getattr(gen, "generation_info", None) or {}
-                        usage = info.get("token_usage") or info.get("usage") or {}
-                        # 避免重复累加：只在 llm_output 没拿到时才从这里取
-                        if not (response.llm_output and response.llm_output.get("token_usage")):
-                            self.total_tokens += usage.get("total_tokens", 0)
-                            self.prompt_tokens += usage.get("prompt_tokens", 0)
-                            self.completion_tokens += usage.get("completion_tokens", 0)
-        except Exception:
-            pass
+        # 兜底 generations
+        if call_total == 0:
+            try:
+                if response and hasattr(response, "generations"):
+                    for gen_list in response.generations:
+                        for gen in gen_list:
+                            info = getattr(gen, "generation_info", None) or {}
+                            usage = info.get("token_usage") or info.get("usage") or {}
+                            call_total += usage.get("total_tokens", 0) or 0
+                            call_prompt += usage.get("prompt_tokens", 0) or 0
+                            call_completion += usage.get("completion_tokens", 0) or 0
+            except Exception:
+                pass
+
+        self.total_tokens += call_total
+        self.prompt_tokens += call_prompt
+        self.completion_tokens += call_completion
+
+        self.call_details.append({
+            "seq": self._seq,
+            "agent": self._current_agent,   # 你要的字段
+            "model": self._current_model,
+            "prompt_tokens": call_prompt,
+            "completion_tokens": call_completion,
+            "total_tokens": call_total,
+        })
+
+    @property
+    def final_model(self) -> Optional[str]:
+        if not self.call_details:
+            return None
+        return self.call_details[-1].get("model")
+
+    @property
+    def final_agent(self) -> Optional[str]:
+        if not self.call_details:
+            return None
+        return self.call_details[-1].get("agent")
 
 
 # ============================================================
@@ -121,12 +166,17 @@ async def _save_chat_log(
     """异步保存会话日志 + 对话记忆"""
     end_time = datetime.now(timezone.utc)
 
-    # 写 memories
+    # 写 memories（assistant 消息带模型名）
     try:
         session_service = SessionService()
         session_service.append_chat_message(session_id, "user", request_content, app_id=app_id)
         if response_content:
-            session_service.append_chat_message(session_id, "assistant", response_content, app_id=app_id)
+            session_service.append_chat_message(
+                session_id, "assistant", response_content,
+                app_id=app_id,
+                model_name=collector.final_model or "",
+                agent_name=collector.final_agent or "",   # 新增
+            )
         logger.info(f"会话记忆已保存: session={session_id}")
     except Exception as e:
         logger.error(f"保存会话记忆失败: {e}", exc_info=True)
@@ -140,22 +190,25 @@ async def _save_chat_log(
             "session_id": session_id,
             "request_content": request_content,
             "response_content": response_content,
-            # 耗时
             "request_time": request_time.isoformat(),
             "first_token_time": collector.first_token_time.isoformat() if collector.first_token_time else None,
             "end_time": end_time.isoformat(),
-            # token 消耗
             "total_tokens": collector.total_tokens or None,
             "prompt_tokens": collector.prompt_tokens or None,
             "completion_tokens": collector.completion_tokens or None,
+            # ===== 新增：模型追踪 =====
+            "model_detail": collector.call_details if collector.call_details else None,
+            "final_model": collector.final_model,
         }
         await log_service.save_log_async(log_data)
         logger.info(
             f"会话日志已保存: session={session_id}, "
-            f"tokens={collector.total_tokens}"
+            f"tokens={collector.total_tokens}, "
+            f"models={[d['model'] for d in collector.call_details]}"  # 日志里也打出来
         )
     except Exception as e:
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
+
 
 
 # ============================================================

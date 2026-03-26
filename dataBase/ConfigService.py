@@ -161,12 +161,16 @@ class ChatLogService(BaseConfigService):
                 "total_tokens",
                 "prompt_tokens",
                 "completion_tokens",
+                # ===== 新增 =====
+                "model_detail",
+                "final_model",
             }
             clean_data = {k: v for k, v in log_data.items() if k in allowed_keys}
             log_model = ChatLogModel(**clean_data)
             self.create(log_model)
         except Exception as e:
             logger.error(f"保存会话日志失败: {e}", exc_info=True)
+
 
     def get_by_session(self, session_id: str) -> List[Dict]:
         return self.crud.find_documents(
