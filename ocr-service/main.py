@@ -8,14 +8,13 @@ import multiprocessing
 import logging
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Any
 from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor
-
+from typing import List, Optional, Any
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from pydantic import BaseModel
+from Schemas import OCRRequest, OCRResponse
 
 # 导入逻辑
 from OCR.OCR import ocr_pipeline_with_executor
@@ -67,15 +66,6 @@ async def lifespan(app: FastAPI):
         logger.info("OCR 进程池已安全关闭")
 
 app = FastAPI(title="OCR Service", lifespan=lifespan)
-
-class OCRRequest(BaseModel):
-    file_path: str
-    batch_size: int = 4
-
-class OCRResponse(BaseModel):
-    success: bool
-    data: Optional[List[Any]] = None
-    error: Optional[str] = None
 
 @app.post("/ocr/process", response_model=OCRResponse)
 async def process_ocr(request: OCRRequest):

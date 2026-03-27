@@ -7,8 +7,9 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from app.Schema import ChatRequest
 from gateway.auth import require_token
-from gateway.schemas import ToolInvokeRequest
+from gateway.schemas import ToolInvokeRequest, FileInfo
 from gateway.store import GatewayConfigStore
+from typing import Any, Dict, List
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 protected_router = APIRouter(
@@ -141,7 +142,7 @@ async def gateway_chat_stream(
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
-@protected_router.get("/file_content")
+@protected_router.get("/file_content",response_model=FileInfo)
 async def gateway_file(
     session_id: str = Query(...),
     app_id: str = Query(..., min_length=1),
@@ -169,5 +170,39 @@ async def gateway_file(
                 status_code=resp.status_code,
                 media_type=resp.headers.get("content-type")
             )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        
+@protected_router.get("/file_list", response_model=List[FileInfo])
+async def gateway_file_list(
+    session_id: str = Query(..., description="会话ID"),
+    app_id: str = Query(..., min_length=1, description="应用ID")
+):
+    backend_base = store.get_backend_base_url()
+    # 按照后端接口规范拼接 URL
+    target_url = f"{backend_base}/sessions/{session_id}/files"
+    
+    query_params = {"app_id": app_id}
+
+    # 建议：在生产环境中，应使用全局单例的 httpx.AsyncClient()
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.get(target_url, params=query_params)
+            
+            # 检查非 200 状态码
+            if resp.status_code != 200:
+                # 尝试解析错误 JSON，解析失败则返回原始文本
+                try:
+                    error_detail = resp.json()
+                except:
+                    error_detail = resp.text
+                return JSONResponse(status_code=resp.status_code, content=error_detail)
+
+            # 成功直接解析 JSON 并返回（FastAPI 会根据 response_model 自动校验）
+            return resp.json()
+
+        except httpx.RequestError as exc:
+            # 捕获网络层错误（如连接超时、DNS 失败）
+            raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
