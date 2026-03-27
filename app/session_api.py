@@ -7,7 +7,7 @@
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Query
 
-from dataBase.Service import SessionService, MemoryService
+from dataBase.Service import SessionService, MemoryService, FileService
 from app.Schema import (
     CreateSessionRequest,
     UpdateSessionRequest,
@@ -93,6 +93,26 @@ def delete_session(
 # ============================================================
 # Session Files（文件挂载管理）
 # ============================================================
+
+@router.get("/files/{file_id}/content", summary="按 app_id + file_id 获取文件内容")
+def get_file_content(
+    file_id: str,
+    app_id: str = Query(..., description="应用ID"),
+) -> Dict[str, Any]:
+    file_svc = FileService()
+    doc = file_svc.get_file_info(file_id=file_id, app_id=app_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"File '{file_id}' not found")
+
+    return {
+        "app_id": doc.get("app_id", ""),
+        "file_id": doc.get("file_id", file_id),
+        "file_name": doc.get("file_name", ""),
+        "file_type": doc.get("file_type", []),
+        "content": doc.get("content", ""),
+        "main_info": doc.get("main_info"),
+        "upload_time": doc.get("upload_time"),
+    }
 
 @router.get("/sessions/{session_id}/files", summary="查询会话关联的文件")
 def get_session_files(

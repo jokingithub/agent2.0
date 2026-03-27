@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话 ID")
     message: str = Field(..., description="用户输入")
-    app_id: str = Field(default="default", description="应用 ID")
+    app_id: str = Field(..., min_length=1, description="应用 ID（必填）")
     scene_id: str = Field(default="default", description="场景 ID")
     recursion_limit: int = Field(50, ge=1, le=200)
 

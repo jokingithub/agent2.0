@@ -67,9 +67,21 @@ class Database:
                     conn.execute(text(f"""
                         CREATE TABLE IF NOT EXISTS {col} (
                             id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid()::varchar,
+                            app_id VARCHAR,
                             data JSONB NOT NULL DEFAULT '{{}}'::jsonb
                         )
                     """))
+                    # 兼容历史表结构：补齐 app_id 列
+                    conn.execute(text(f"ALTER TABLE {col} ADD COLUMN IF NOT EXISTS app_id VARCHAR"))
+                    # 回填历史数据中 data.app_id 到独立列
+                    conn.execute(text(f"""
+                        UPDATE {col}
+                        SET app_id = data->>'app_id'
+                        WHERE app_id IS NULL
+                          AND data ? 'app_id'
+                    """))
+                    # 给独立 app_id 列建立索引
+                    conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_{col}_app_id_col ON {col} (app_id)"))
 
                 # 现有业务表索引
                 conn.execute(text("""

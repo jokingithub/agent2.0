@@ -2,8 +2,8 @@
 import json
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, Query
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from app.Schema import ChatRequest
 from gateway.auth import require_token
@@ -79,6 +79,7 @@ async def invoke_tool(
 @protected_router.post("/upload")
 async def gateway_upload(
     session_id: str = Form(...),
+    app_id: str = Form(..., min_length=1),
     file: UploadFile = File(...),
 ):
     backend = store.get_backend_base_url()
@@ -92,7 +93,10 @@ async def gateway_upload(
             file.content_type or "application/octet-stream",
         )
     }
-    data = {"session_id": session_id}
+    data = {
+        "session_id": session_id,
+        "app_id": app_id,
+    }
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(target_url, data=data, files=files)
@@ -136,3 +140,34 @@ async def gateway_chat_stream(
                     yield chunk
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
+
+@protected_router.get("/file_content")
+async def gateway_file(
+    session_id: str = Query(...),
+    app_id: str = Query(..., min_length=1),
+    file_id: str = Query(...),
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/files/{file_id}/content"
+
+    # GET 请求参数应该放在 params 中（URL 参数）
+    params = {
+        "app_id": app_id,
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.get(target_url, params=params)
+            
+            # 检查后端是否返回错误
+            if resp.status_code != 200:
+                return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+            # 如果返回的是文件内容，直接透传 content 和 media_type
+            return Response(
+                content=resp.content, 
+                status_code=resp.status_code,
+                media_type=resp.headers.get("content-type")
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))

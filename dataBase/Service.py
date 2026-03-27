@@ -27,6 +27,15 @@ class FileService:
         doc["_id"] = file_info.file_id
 
         if hit := self.crud.find_one(self.collection, {"_id": file_info.file_id}):
+            # 兼容历史数据：旧记录 app_id 为空时，使用本次上传的 app_id 回填
+            hit_app_id = (hit.get("app_id") or "").strip()
+            new_app_id = (file_info.app_id or "").strip()
+            if not hit_app_id and new_app_id:
+                self.crud.update_document(
+                    self.collection,
+                    {"_id": file_info.file_id},
+                    {"app_id": new_app_id}
+                )
             return hit["_id"]
 
         return self.crud.insert_document(self.collection, doc)

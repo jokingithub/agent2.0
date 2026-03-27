@@ -150,6 +150,7 @@ async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
         logger.error(f"文件上传和提取失败: {e}", exc_info=True)
         return {
             "session_id": session_id,
+            "app_id": app_id,
             "file_name": file.filename if file else "",
             "file_id": None,
             "file_type": [],

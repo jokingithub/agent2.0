@@ -20,6 +20,7 @@ from app.config_api import router as config_router
 from app.session_api import router as session_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
+from fastapi.middleware.cors import CORSMiddleware  # 1. 导入中间件
 from app.file_api import router as file_router
 
 
@@ -45,6 +46,26 @@ app.include_router(file_router)
 graph = create_graph()
 
 
+# 2. 定义允许的源（即允许哪些前端域名访问）
+# 如果是在开发环境，可以使用 ["*"] 允许所有。在生产环境建议指定具体域名。
+origins = [
+    "http://localhost",
+    "http://localhost:3000",  # 常见的 React/Next.js 端口
+    "https://your-frontend-domain.com", 
+    "*", # 临时允许所有来源，方便调试
+]
+
+# 3. 将中间件添加到 app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,           # 允许跨域的源列表
+    allow_credentials=True,          # 允许携带 Cookie
+    allow_methods=["*"],             # 允许所有的 HTTP 方法 (GET, POST, OPTIONS, 等)
+    allow_headers=["*"],             # 允许所有的请求头
+)
+
+
+
 
 # ============================================================
 # 路由
@@ -58,7 +79,7 @@ def health() -> dict[str, str]:
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(
     session_id: str = Form(..., description="会话 ID"),
-    app_id: str = Form("", description="应用 ID"),
+    app_id: str = Form(..., min_length=1, description="应用 ID（必填）"),
     file: UploadFile = File(..., description="上传的文件")
 ) -> UploadResponse:
     try:
