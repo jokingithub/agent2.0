@@ -17,11 +17,12 @@ class CRUD:
         if doc_id is None:
             doc_id = str(uuid.uuid4())
         doc_id = str(doc_id)
+        app_id = document.get("app_id")
 
         with self._get_session() as session:
             session.execute(
-                text(f"INSERT INTO {collection_name} (id, data) VALUES (:id, :data)"),
-                {"id": doc_id, "data": json.dumps(document, default=str)}
+                text(f"INSERT INTO {collection_name} (id, app_id, data) VALUES (:id, :app_id, :data)"),
+                {"id": doc_id, "app_id": str(app_id) if app_id is not None else None, "data": json.dumps(document, default=str)}
             )
             session.commit()
         return doc_id
@@ -77,7 +78,16 @@ class CRUD:
         params["update_data"] = json.dumps(update_data, default=str)
 
         # 用 CAST 替代 ::jsonb，避免和 SQLAlchemy 的 :param 冲突
-        update_sql = f"UPDATE {collection_name} SET data = data || CAST(:update_data AS jsonb) WHERE {where_clause}"
+        app_id_in_update = update_data.get("app_id") if "app_id" in update_data else None
+        if "app_id" in update_data:
+            update_sql = (
+                f"UPDATE {collection_name} "
+                f"SET app_id = :app_id_col, data = data || CAST(:update_data AS jsonb) "
+                f"WHERE {where_clause}"
+            )
+            params["app_id_col"] = str(app_id_in_update) if app_id_in_update is not None else None
+        else:
+            update_sql = f"UPDATE {collection_name} SET data = data || CAST(:update_data AS jsonb) WHERE {where_clause}"
 
         with self._get_session() as session:
             if upsert:
@@ -86,9 +96,14 @@ class CRUD:
                     doc_id = query.get("_id", str(uuid.uuid4()))
                     merged = {**query, **update_data}
                     merged.pop("_id", None)
+                    merged_app_id = merged.get("app_id")
                     session.execute(
-                        text(f"INSERT INTO {collection_name} (id, data) VALUES (:id, CAST(:data AS jsonb))"),
-                        {"id": str(doc_id), "data": json.dumps(merged, default=str)}
+                        text(f"INSERT INTO {collection_name} (id, app_id, data) VALUES (:id, :app_id, CAST(:data AS jsonb))"),
+                        {
+                            "id": str(doc_id),
+                            "app_id": str(merged_app_id) if merged_app_id is not None else None,
+                            "data": json.dumps(merged, default=str)
+                        }
                     )
                 count = max(result.rowcount, 1)
             else:
@@ -140,9 +155,17 @@ class CRUD:
                     ph = f"{param_name}_{j}"
                     placeholders.append(f":{ph}")
                     params[ph] = str(v)
-                conditions.append(f"data->>'{key}' IN ({', '.join(placeholders)})")
+                if key == "app_id":
+                    conditions.append(
+                        f"(app_id IN ({', '.join(placeholders)}) OR data->>'app_id' IN ({', '.join(placeholders)}))"
+                    )
+                else:
+                    conditions.append(f"data->>'{key}' IN ({', '.join(placeholders)})")
             else:
-                conditions.append(f"data->>'{key}' = :{param_name}")
+                if key == "app_id":
+                    conditions.append(f"(app_id = :{param_name} OR data->>'app_id' = :{param_name})")
+                else:
+                    conditions.append(f"data->>'{key}' = :{param_name}")
                 params[param_name] = str(value)
 
         return " AND ".join(conditions), params

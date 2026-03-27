@@ -3,9 +3,9 @@ import asyncio
 import os
 import secrets
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 from dataBase.ConfigService import (
     ModelConnectionService, ModelLevelService,
     GatewayEnvService, GatewayAppService, GatewayChannelService,
@@ -483,16 +483,43 @@ def register_crud_routes(
     name: str,
     create_enabled: bool = True,
     update_enabled: bool = True,
+    lookup_field: str = "_id",
+    lookup_param: str = "doc_id",
 ):
     service = service_class()
+
+    def _build_request_model(mc, model_name: str, partial: bool = False):
+        """为请求体动态生成模型，屏蔽只读字段。"""
+        readonly_fields = {"id", "created_at", "updated_at"}
+        fields: Dict[str, Any] = {}
+
+        for fname, finfo in mc.model_fields.items():
+            if fname in readonly_fields:
+                continue
+
+            if partial:
+                fields[fname] = (Optional[finfo.annotation], None)
+            else:
+                if finfo.is_required():
+                    fields[fname] = (finfo.annotation, ...)
+                elif finfo.default_factory is not None:
+                    fields[fname] = (finfo.annotation, Field(default_factory=finfo.default_factory))
+                else:
+                    fields[fname] = (finfo.annotation, finfo.default)
+
+        return create_model(model_name, **fields)
 
     @router.get(f"/{path}", summary=f"获取所有{name}")
     def get_all():
         return service.get_all()
 
-    @router.get(f"/{path}/{{doc_id}}", summary=f"获取单个{name}")
-    def get_one(doc_id: str):
-        result = service.get_by_id(doc_id)
+    @router.get(f"/{path}/{{{lookup_param}}}", summary=f"获取单个{name}")
+    def get_one(lookup_value: str = Path(..., alias=lookup_param)):
+        if lookup_field == "_id":
+            result = service.get_by_id(lookup_value)
+        else:
+            rows = service.query({lookup_field: lookup_value})
+            result = rows[0] if rows else None
         if not result:
             raise HTTPException(status_code=404, detail=f"{name}不存在")
         return result
@@ -500,29 +527,48 @@ def register_crud_routes(
     if create_enabled:
         # 用闭包捕获 model_class，让 FastAPI 能读到字段定义
         def make_create(mc, svc, label):
+            create_req_model = _build_request_model(mc, f"{mc.__name__}CreateRequestAuto", partial=False)
+
             @router.post(f"/{path}", summary=f"创建{label}")
-            def create(data: mc):
+            def create(data):
                 doc_id = svc.create(data)
                 return {"id": doc_id, "message": f"{label}创建成功"}
+            create.__annotations__["data"] = create_req_model
             return create
         make_create(model_class, service, name)
 
     if update_enabled:
         # update 也一样，用 model_class 替代 Dict
         def make_update(mc, svc, label):
-            @router.put(f"/{path}/{{doc_id}}", summary=f"更新{label}")
-            def update(doc_id: str, data: mc):
-                update_dict = data.model_dump(exclude_none=True, exclude={"id"})
-                count = svc.update(doc_id, update_dict)
+            update_req_model = _build_request_model(mc, f"{mc.__name__}UpdateRequestAuto", partial=True)
+
+            @router.put(f"/{path}/{{{lookup_param}}}", summary=f"更新{label}")
+            def update(lookup_value: str = Path(..., alias=lookup_param), data = ...):
+                update_dict = data.model_dump(
+                    exclude_none=True,
+                    exclude={"id", "created_at", "updated_at"}
+                )
+                if lookup_field == "_id":
+                    count = svc.update(lookup_value, update_dict)
+                else:
+                    rows = svc.query({lookup_field: lookup_value})
+                    target = rows[0] if rows else None
+                    count = svc.update(target["_id"], update_dict) if target else 0
                 if count == 0:
                     raise HTTPException(status_code=404, detail=f"{label}不存在")
                 return {"message": f"{label}更新成功"}
+            update.__annotations__["data"] = update_req_model
             return update
         make_update(model_class, service, name)
 
-    @router.delete(f"/{path}/{{doc_id}}", summary=f"删除{name}")
-    def delete(doc_id: str):
-        count = service.delete(doc_id)
+    @router.delete(f"/{path}/{{{lookup_param}}}", summary=f"删除{name}")
+    def delete(lookup_value: str = Path(..., alias=lookup_param)):
+        if lookup_field == "_id":
+            count = service.delete(lookup_value)
+        else:
+            rows = service.query({lookup_field: lookup_value})
+            target = rows[0] if rows else None
+            count = service.delete(target["_id"]) if target else 0
         if count == 0:
             raise HTTPException(status_code=404, detail=f"{name}不存在")
         return {"message": f"{name}删除成功"}
@@ -539,7 +585,15 @@ register_crud_routes(
     update_enabled=False,
 )
 register_crud_routes("model-levels", ModelLevelService, ModelLevelModel, "模型分级")
-register_crud_routes("gateway-apps", GatewayAppService, GatewayAppModel, "外部调用配置", create_enabled=False)
+register_crud_routes(
+    "gateway-apps",
+    GatewayAppService,
+    GatewayAppModel,
+    "外部调用配置",
+    create_enabled=False,
+    lookup_field="app_id",
+    lookup_param="app_id",
+)
 register_crud_routes("gateway-channels", GatewayChannelService, GatewayChannelModel, "渠道配置")
 register_crud_routes("tools", ToolService, ToolModel, "工具")
 register_crud_routes("roles", RoleService, RoleModel, "角色")

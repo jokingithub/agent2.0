@@ -41,18 +41,15 @@ class GatewayConfigStore:
 
         return f"http://{host}:{port}"
 
-    def validate_token(self, token: str) -> bool:
+    def validate_token(self, app_id: str, token: str) -> bool:
         """
-        在 gateway_apps 中按 auth_token 校验。
+        在 gateway_apps 中按 app_id + auth_token 校验。
         """
+        if not app_id:
+            return False
         if not token:
             return False
-
-        all_apps = self.gateway_app_service.get_all()
-        for app in all_apps:
-            if app.get("auth_token") == token:
-                return True
-        return False
+        return self.gateway_app_service.validate_token(app_id, token)
 
     def get_tool(self, tool_id: str) -> Optional[Dict[str, Any]]:
         """

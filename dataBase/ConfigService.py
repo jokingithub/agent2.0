@@ -23,6 +23,9 @@ class BaseConfigService:
 
     def create(self, data) -> str:
         doc = data.model_dump(by_alias=True, exclude_none=True)
+        # 时间字段统一由服务端生成，避免客户端手工覆盖
+        doc.pop("created_at", None)
+        doc.pop("updated_at", None)
         doc["created_at"] = datetime.now().isoformat()
         doc["updated_at"] = datetime.now().isoformat()
         return self.crud.insert_document(self.collection, doc)
