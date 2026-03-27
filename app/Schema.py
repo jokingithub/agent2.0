@@ -41,6 +41,10 @@ class ModelConnectionCreateRequest(BaseModel):
     base_url: str = Field(..., description="模型服务基础地址")
     api_key: str = Field(..., description="模型服务密钥")
     description: Optional[str] = Field(default=None, description="连接描述")
+    models: Optional[List[str]] = Field(
+        default=None,
+        description="可选：手工指定模型列表；不传则由后端自动探测/保持空列表"
+    )
 
 
 class ModelConnectionUpdateRequest(BaseModel):

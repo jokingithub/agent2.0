@@ -25,6 +25,10 @@ from app.Schema import (
     MCPToolSyncRequest
 )
 from logger import logger
+from pathlib import Path
+from collections import deque
+from config import Config
+
 
 router = APIRouter(prefix="/config", tags=["配置管理"])
 
@@ -33,6 +37,101 @@ router = APIRouter(prefix="/config", tags=["配置管理"])
 # ============================================================
 # 特殊接口（非标准CRUD）
 # ============================================================
+
+# --- 系统日志 ---
+def _resolve_log_file(file_name: str = "app.log") -> Path:
+    """
+    解析日志文件路径：
+    - Config.LOG_FILE_PATH 若为相对路径，按项目根目录拼接
+    - file_name 仅允许 app.log*，防止路径穿越
+    """
+    base_name = (file_name or "app.log").strip()
+
+    # 只允许读取 app.log / app.log.1 / app.log.2 ...
+    if not base_name.startswith("app.log") or "/" in base_name or "\\" in base_name:
+        raise HTTPException(status_code=400, detail="非法日志文件名")
+
+    project_root = Path(__file__).resolve().parents[1]  # agent2.0/
+    configured = Path(Config.LOG_FILE_PATH)
+
+    log_path = configured if configured.is_absolute() else (project_root / configured)
+    log_dir = log_path.parent
+
+    target = log_dir / base_name
+    return target
+
+
+def _tail_lines(path: Path, n: int) -> list[str]:
+    if n <= 0:
+        return []
+    if not path.exists():
+        return []
+
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        return [line.rstrip("\n") for line in deque(f, maxlen=n)]
+
+
+@router.get("/system-logs/files", summary="获取系统日志文件列表")
+def list_system_log_files():
+    """
+    返回 logs 目录下可读的 app.log* 文件（按修改时间倒序）
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    configured = Path(Config.LOG_FILE_PATH)
+    log_path = configured if configured.is_absolute() else (project_root / configured)
+    log_dir = log_path.parent
+
+    if not log_dir.exists():
+        return {"files": []}
+
+    files = []
+    for p in log_dir.glob("app.log*"):
+        if p.is_file():
+            stat = p.stat()
+            files.append({
+                "name": p.name,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+            })
+
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"files": files}
+
+
+@router.get("/system-logs", summary="读取系统日志（tail）")
+def get_system_logs(
+    file: str = "app.log",
+    tail: int = 200,
+    level: Optional[str] = None,
+    keyword: Optional[str] = None,
+):
+    """
+    tail: 返回最后 N 行（1~2000）
+    level: 可选过滤，如 INFO/WARNING/ERROR/DEBUG
+    keyword: 可选关键字过滤
+    """
+    if tail < 1:
+        tail = 1
+    if tail > 2000:
+        tail = 2000
+
+    path = _resolve_log_file(file)
+    lines = _tail_lines(path, tail)
+
+    level_upper = (level or "").strip().upper()
+    kw = (keyword or "").strip().lower()
+
+    if level_upper:
+        lines = [x for x in lines if level_upper in x.upper()]
+    if kw:
+        lines = [x for x in lines if kw in x.lower()]
+
+    return {
+        "file": path.name,
+        "exists": path.exists(),
+        "count": len(lines),
+        "lines": lines,
+    }
 
 # --- 网关环境（单例） ---
 _gateway_env_service = GatewayEnvService()
@@ -150,85 +249,126 @@ async def _fetch_models_from_connection(base_url: str, api_key: str, protocol: s
     logger.warning(f"自动拉取模型失败 protocol={protocol}, base_url={base}, detail={detail}")
     raise RuntimeError(f"自动拉取模型失败：{detail}")
 
-
-@router.post("/model-connections", summary="创建模型连接（自动拉取模型列表）")
+@router.post("/model-connections", summary="创建模型连接（不校验，直接写库）")
 def create_model_connection(data: ModelConnectionCreateRequest):
-    try:
-        models = asyncio.run(
-            _fetch_models_from_connection(
-                base_url=data.base_url,
-                api_key=data.api_key,
-                protocol=data.protocol,
-            )
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
     model = ModelConnectionModel(
         protocol=data.protocol,
         base_url=data.base_url,
         api_key=data.api_key,
-        models=models,
+        models=getattr(data, "models", []) or [],
         description=data.description,
     )
     doc_id = _model_connection_service.create(model)
     return {
         "id": doc_id,
-        "models_count": len(models),
-        "models": models,
-        "message": "模型连接创建成功（已自动同步模型列表）",
+        "message": "模型连接创建成功",
     }
 
 
-@router.put("/model-connections/{doc_id}", summary="更新模型连接（自动刷新模型列表）")
+@router.put("/model-connections/{doc_id}", summary="更新模型连接（不校验，不自动刷新模型列表）")
 def update_model_connection(doc_id: str, data: ModelConnectionUpdateRequest):
     current = _model_connection_service.get_by_id(doc_id)
     if not current:
         raise HTTPException(status_code=404, detail="模型连接不存在")
 
-    protocol = data.protocol if data.protocol is not None else current.get("protocol", "")
-    base_url = data.base_url if data.base_url is not None else current.get("base_url", "")
-    api_key = data.api_key if data.api_key is not None else current.get("api_key", "")
-    description = data.description if data.description is not None else current.get("description")
+    update_data = {}
+    if data.protocol is not None:
+        update_data["protocol"] = data.protocol
+    if data.base_url is not None:
+        update_data["base_url"] = data.base_url
+    if data.api_key is not None:
+        update_data["api_key"] = data.api_key
+    if data.description is not None:
+        update_data["description"] = data.description
+    if getattr(data, "models", None) is not None:
+        update_data["models"] = data.models
 
-    # 优先允许手工指定；否则在连接信息变化或当前模型列表为空时自动刷新
-    if data.models is not None:
-        models = data.models
-    else:
-        need_refresh = (
-            data.protocol is not None
-            or data.base_url is not None
-            or data.api_key is not None
-            or not current.get("models")
-        )
-        if need_refresh:
-            try:
-                models = asyncio.run(
-                    _fetch_models_from_connection(
-                        base_url=base_url,
-                        api_key=api_key,
-                        protocol=protocol,
-                    )
-                )
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=str(e))
-        else:
-            models = current.get("models", [])
+    if not update_data:
+        return {"message": "无更新字段"}
 
-    update_data = {
-        "protocol": protocol,
-        "base_url": base_url,
-        "api_key": api_key,
-        "description": description,
-        "models": models,
-    }
     _model_connection_service.update(doc_id, update_data)
-
     return {
         "message": "模型连接更新成功",
-        "models_count": len(models),
-        "models": models,
     }
+
+# @router.post("/model-connections", summary="创建模型连接（自动拉取模型列表）")
+# def create_model_connection(data: ModelConnectionCreateRequest):
+#     try:
+#         models = asyncio.run(
+#             _fetch_models_from_connection(
+#                 base_url=data.base_url,
+#                 api_key=data.api_key,
+#                 protocol=data.protocol,
+#             )
+#         )
+#     except Exception as e:
+#         raise HTTPException(status_code=400, detail=str(e))
+
+#     model = ModelConnectionModel(
+#         protocol=data.protocol,
+#         base_url=data.base_url,
+#         api_key=data.api_key,
+#         models=models,
+#         description=data.description,
+#     )
+#     doc_id = _model_connection_service.create(model)
+#     return {
+#         "id": doc_id,
+#         "models_count": len(models),
+#         "models": models,
+#         "message": "模型连接创建成功（已自动同步模型列表）",
+#     }
+
+
+# @router.put("/model-connections/{doc_id}", summary="更新模型连接（自动刷新模型列表）")
+# def update_model_connection(doc_id: str, data: ModelConnectionUpdateRequest):
+#     current = _model_connection_service.get_by_id(doc_id)
+#     if not current:
+#         raise HTTPException(status_code=404, detail="模型连接不存在")
+
+#     protocol = data.protocol if data.protocol is not None else current.get("protocol", "")
+#     base_url = data.base_url if data.base_url is not None else current.get("base_url", "")
+#     api_key = data.api_key if data.api_key is not None else current.get("api_key", "")
+#     description = data.description if data.description is not None else current.get("description")
+
+#     # 优先允许手工指定；否则在连接信息变化或当前模型列表为空时自动刷新
+#     if data.models is not None:
+#         models = data.models
+#     else:
+#         need_refresh = (
+#             data.protocol is not None
+#             or data.base_url is not None
+#             or data.api_key is not None
+#             or not current.get("models")
+#         )
+#         if need_refresh:
+#             try:
+#                 models = asyncio.run(
+#                     _fetch_models_from_connection(
+#                         base_url=base_url,
+#                         api_key=api_key,
+#                         protocol=protocol,
+#                     )
+#                 )
+#             except Exception as e:
+#                 raise HTTPException(status_code=400, detail=str(e))
+#         else:
+#             models = current.get("models", [])
+
+#     update_data = {
+#         "protocol": protocol,
+#         "base_url": base_url,
+#         "api_key": api_key,
+#         "description": description,
+#         "models": models,
+#     }
+#     _model_connection_service.update(doc_id, update_data)
+
+#     return {
+#         "message": "模型连接更新成功",
+#         "models_count": len(models),
+#         "models": models,
+#     }
 
 @router.get("/model-levels/fallback-chain", summary="获取模型降级链")
 def get_fallback_chain():
@@ -396,6 +536,26 @@ def get_logs_by_session(session_id: str):
 @router.get("/chat-logs/app/{app_id}", summary="按应用查日志")
 def get_logs_by_app(app_id: str, limit: int = 100):
     return _chat_log_service.get_by_app(app_id, limit)
+
+@router.get("/chat-logs", summary="查询会话日志（可选按 app_id / session_id 过滤）")
+def list_chat_logs(app_id: Optional[str] = None, session_id: Optional[str] = None, limit: int = 200):
+    if session_id:
+        rows = _chat_log_service.get_by_session(session_id)
+    elif app_id:
+        rows = _chat_log_service.get_by_app(app_id, limit)
+    else:
+        rows = _chat_log_service.get_all()
+
+    # 统一按 request_time 倒序，且限制返回数量
+    def _ts(x):
+        return x.get("request_time") or ""
+    rows = sorted(rows, key=_ts, reverse=True)
+
+    if limit and limit > 0:
+        rows = rows[:limit]
+
+    return rows
+
 
 
 # --- 场景查询 ---
