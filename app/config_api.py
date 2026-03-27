@@ -3,7 +3,7 @@ import asyncio
 import os
 import secrets
 import httpx
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path as ApiPath
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field, create_model
 from dataBase.ConfigService import (
@@ -25,7 +25,7 @@ from app.Schema import (
     MCPToolSyncRequest
 )
 from logger import logger
-from pathlib import Path
+from pathlib import Path as FilePath
 from collections import deque
 from config import Config
 
@@ -39,7 +39,7 @@ router = APIRouter(prefix="/config", tags=["配置管理"])
 # ============================================================
 
 # --- 系统日志 ---
-def _resolve_log_file(file_name: str = "app.log") -> Path:
+def _resolve_log_file(file_name: str = "app.log") -> FilePath:
     """
     解析日志文件路径：
     - Config.LOG_FILE_PATH 若为相对路径，按项目根目录拼接
@@ -51,8 +51,8 @@ def _resolve_log_file(file_name: str = "app.log") -> Path:
     if not base_name.startswith("app.log") or "/" in base_name or "\\" in base_name:
         raise HTTPException(status_code=400, detail="非法日志文件名")
 
-    project_root = Path(__file__).resolve().parents[1]  # agent2.0/
-    configured = Path(Config.LOG_FILE_PATH)
+    project_root = FilePath(__file__).resolve().parents[1]  # agent2.0/
+    configured = FilePath(Config.LOG_FILE_PATH)
 
     log_path = configured if configured.is_absolute() else (project_root / configured)
     log_dir = log_path.parent
@@ -61,7 +61,7 @@ def _resolve_log_file(file_name: str = "app.log") -> Path:
     return target
 
 
-def _tail_lines(path: Path, n: int) -> list[str]:
+def _tail_lines(path: FilePath, n: int) -> list[str]:
     if n <= 0:
         return []
     if not path.exists():
@@ -76,8 +76,8 @@ def list_system_log_files():
     """
     返回 logs 目录下可读的 app.log* 文件（按修改时间倒序）
     """
-    project_root = Path(__file__).resolve().parents[1]
-    configured = Path(Config.LOG_FILE_PATH)
+    project_root = FilePath(__file__).resolve().parents[1]
+    configured = FilePath(Config.LOG_FILE_PATH)
     log_path = configured if configured.is_absolute() else (project_root / configured)
     log_dir = log_path.parent
 
@@ -674,7 +674,7 @@ def register_crud_routes(
         return service.get_all()
 
     @router.get(f"/{path}/{{{lookup_param}}}", summary=f"获取单个{name}")
-    def get_one(lookup_value: str = Path(..., alias=lookup_param)):
+    def get_one(lookup_value: str = ApiPath(..., alias=lookup_param)):
         if lookup_field == "_id":
             result = service.get_by_id(lookup_value)
         else:
@@ -703,7 +703,7 @@ def register_crud_routes(
             update_req_model = _build_request_model(mc, f"{mc.__name__}UpdateRequestAuto", partial=True)
 
             @router.put(f"/{path}/{{{lookup_param}}}", summary=f"更新{label}")
-            def update(lookup_value: str = Path(..., alias=lookup_param), data = ...):
+            def update(lookup_value: str = ApiPath(..., alias=lookup_param), data = ...):
                 update_dict = data.model_dump(
                     exclude_none=True,
                     exclude={"id", "created_at", "updated_at"}
@@ -722,7 +722,7 @@ def register_crud_routes(
         make_update(model_class, service, name)
 
     @router.delete(f"/{path}/{{{lookup_param}}}", summary=f"删除{name}")
-    def delete(lookup_value: str = Path(..., alias=lookup_param)):
+    def delete(lookup_value: str = ApiPath(..., alias=lookup_param)):
         if lookup_field == "_id":
             count = service.delete(lookup_value)
         else:
