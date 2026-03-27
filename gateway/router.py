@@ -148,13 +148,11 @@ async def gateway_file(
     file_id: str = Query(...),
 ):
     backend = store.get_backend_base_url()
-    target_url = f"{backend}/file/{file_id}/content"
+    target_url = f"{backend}/files/{file_id}/content"
 
     # GET 请求参数应该放在 params 中（URL 参数）
     params = {
-        "session_id": session_id,
         "app_id": app_id,
-        "file_id": file_id,
     }
 
     async with httpx.AsyncClient(timeout=120) as client:
