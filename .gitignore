@@ -43,4 +43,4 @@ sessions/
 
 test_data/
 
-logs/
+logs/docker-compose.yml
