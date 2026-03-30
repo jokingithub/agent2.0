@@ -10,12 +10,10 @@ from gateway.auth import require_token
 from gateway.schemas import (
     ToolInvokeRequest,
     FileInfo,
-    WhitelistReplaceRequest,
-    WhitelistItemRequest,
+    FileProcessingStatus,
 )
 from gateway.store import GatewayConfigStore
 from typing import Any, Dict, List
-from dataBase.ConfigService import GatewayEnvService
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 protected_router = APIRouter(
@@ -24,79 +22,6 @@ protected_router = APIRouter(
     dependencies=[Depends(require_token)],
 )
 store = GatewayConfigStore()
-gateway_env_service = GatewayEnvService()
-
-
-def _normalize_origin(origin: str) -> str:
-    v = (origin or "").strip()
-    if not v:
-        raise HTTPException(status_code=400, detail="origin 不能为空")
-
-    if v == "*":
-        return v
-
-    v = v.rstrip("/")
-    if not (v.startswith("http://") or v.startswith("https://")):
-        raise HTTPException(status_code=400, detail="origin 必须以 http:// 或 https:// 开头，或使用 *")
-
-    return v
-
-
-def _dedup_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    result: List[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
-
-
-def _save_whitelist(whitelist: List[str]) -> None:
-    current = gateway_env_service.get_current()
-    if current:
-        gateway_env_service.update(current["_id"], {"whitelist": whitelist})
-    else:
-        gateway_env_service.create(gateway_env_service.model_class(port=8000, whitelist=whitelist))
-
-
-@router.get("/whitelist")
-def get_whitelist() -> Dict[str, List[str]]:
-    env = gateway_env_service.get_current() or {}
-    wl = env.get("whitelist") or []
-    return {"whitelist": wl}
-
-
-@router.put("/whitelist")
-def replace_whitelist(req: WhitelistReplaceRequest) -> Dict[str, Any]:
-    normalized = [_normalize_origin(x) for x in req.whitelist]
-    normalized = _dedup_keep_order(normalized)
-    _save_whitelist(normalized)
-    return {"message": "白名单更新成功", "whitelist": normalized}
-
-
-@router.post("/whitelist")
-def add_whitelist_item(req: WhitelistItemRequest) -> Dict[str, Any]:
-    origin = _normalize_origin(req.origin)
-    env = gateway_env_service.get_current() or {}
-    wl = env.get("whitelist") or []
-    new_wl = _dedup_keep_order([*wl, origin])
-    _save_whitelist(new_wl)
-    return {"message": "白名单新增成功", "whitelist": new_wl}
-
-
-@router.delete("/whitelist")
-def remove_whitelist_item(origin: str = Query(..., min_length=1)) -> Dict[str, Any]:
-    target = _normalize_origin(origin)
-    env = gateway_env_service.get_current() or {}
-    wl = env.get("whitelist") or []
-
-    if target not in wl:
-        raise HTTPException(status_code=404, detail="白名单项不存在")
-
-    new_wl = [x for x in wl if x != target]
-    _save_whitelist(new_wl)
-    return {"message": "白名单删除成功", "whitelist": new_wl}
 
 
 def _is_local_ip(ip: str) -> bool:
@@ -251,6 +176,72 @@ async def gateway_file(
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+@protected_router.get("/files/{file_id}/status", response_model=FileProcessingStatus)
+async def gateway_file_processing_status(
+    file_id: str,
+    app_id: str = Query(..., min_length=1, description="应用ID"),
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/files/{file_id}/status"
+    params = {"app_id": app_id}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.get(target_url, params=params)
+
+            if resp.status_code != 200:
+                try:
+                    error_detail = resp.json()
+                except Exception:
+                    error_detail = {"detail": resp.text}
+                return JSONResponse(status_code=resp.status_code, content=error_detail)
+
+            return resp.json()
+
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@protected_router.get("/files/{file_id}/download")
+async def gateway_download_file(
+    file_id: str,
+    app_id: str = Query(..., min_length=1, description="应用ID"),
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/files/{file_id}/download"
+    params = {"app_id": app_id}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.get(target_url, params=params)
+
+            if resp.status_code != 200:
+                content_type = resp.headers.get("content-type", "")
+                if "application/json" in content_type.lower():
+                    return JSONResponse(status_code=resp.status_code, content=resp.json())
+                return JSONResponse(status_code=resp.status_code, content={"detail": resp.text})
+
+            headers: dict[str, str] = {}
+            content_disposition = resp.headers.get("content-disposition")
+            if content_disposition:
+                headers["content-disposition"] = content_disposition
+
+            media_type = resp.headers.get("content-type") or "application/octet-stream"
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                media_type=media_type,
+                headers=headers,
+            )
+
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
         
 @protected_router.get("/file_list", response_model=List[FileInfo])
 async def gateway_file_list(
@@ -282,6 +273,35 @@ async def gateway_file_list(
 
         except httpx.RequestError as exc:
             # 捕获网络层错误（如连接超时、DNS 失败）
+            raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@protected_router.delete("/sessions/{session_id}/files/{file_id}")
+async def gateway_remove_file_from_session(
+    session_id: str,
+    file_id: str,
+    app_id: str = Query("", description="应用ID"),
+):
+    backend_base = store.get_backend_base_url()
+    target_url = f"{backend_base}/sessions/{session_id}/files/{file_id}"
+
+    query_params = {"app_id": app_id}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.delete(target_url, params=query_params)
+
+            content_type = resp.headers.get("content-type", "")
+            if "application/json" in content_type.lower():
+                return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+            return JSONResponse(
+                status_code=resp.status_code,
+                content={"raw": resp.text},
+            )
+        except httpx.RequestError as exc:
             raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

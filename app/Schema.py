@@ -64,6 +64,14 @@ class MCPToolSyncRequest(BaseModel):
     prune_missing: bool = Field(default=False, description="是否自动下线远端已不存在的本地MCP工具")
 
 
+class WhitelistReplaceRequest(BaseModel):
+    whitelist: List[str] = Field(default_factory=list, description="完整白名单列表（支持 http/https 源或 *）")
+
+
+class WhitelistItemRequest(BaseModel):
+    origin: str = Field(..., min_length=1, description="单个白名单源（例如 http://localhost:3000）")
+
+
 
 # ============================================================
 # Token & 耗时 收集器

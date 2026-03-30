@@ -18,6 +18,17 @@ class FileInfo(BaseModel):
     main_info: Dict[str, Any] = None
 
 
+class FileProcessingStatus(BaseModel):
+    app_id: str
+    file_id: str
+    file_name: str
+    processing_status: str
+    processing_stage: str | None = None
+    processing_message: str | None = None
+    updated_at: str | None = None
+    upload_time: str | None = None
+
+
 class WhitelistReplaceRequest(BaseModel):
     whitelist: List[str] = Field(default_factory=list, description="完整白名单列表（支持 http/https 源或 *）")
 

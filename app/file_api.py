@@ -2,9 +2,11 @@
 # 文件：app/file_api.py
 
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from dataBase.Service import FileService, SessionService
 from logger import logger
@@ -13,6 +15,18 @@ router = APIRouter(prefix="", tags=["文件管理"])
 
 _file_service = FileService()
 _session_service = SessionService()
+
+
+def _safe_filename_stem(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_\-.()\u4e00-\u9fa5]", "_", name) or "unnamed"
+
+
+def _is_under_dir(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
 
 
 def _require_app_id(app_id: str) -> str:
@@ -103,6 +117,67 @@ def get_file_detail(
         raise HTTPException(status_code=404, detail="文件不存在")
 
     return _to_file_item(doc, with_content=with_content)
+
+
+@router.get("/files/{file_id}/status", summary="查询文件处理状态")
+def get_file_processing_status(
+    file_id: str,
+    app_id: str = Query(..., description="应用ID（必填）"),
+):
+    app_id = _require_app_id(app_id)
+
+    status = _file_service.get_processing_status(file_id=file_id, app_id=app_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return status
+
+
+@router.get("/files/{file_id}/download", summary="下载文件")
+def download_file(
+    file_id: str,
+    app_id: str = Query(..., description="应用ID（必填）"),
+):
+    app_id = _require_app_id(app_id)
+
+    doc = _file_service.get_file_info(file_id, app_id=app_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    project_root = Path(__file__).resolve().parents[1]
+    uploads_root = (project_root / "uploads").resolve()
+    app_upload_dir = (uploads_root / app_id).resolve()
+
+    candidates: List[Path] = []
+
+    stored_file_path = (doc.get("file_path") or "").strip()
+    if stored_file_path:
+        stored_path = Path(stored_file_path).resolve()
+        # 仅允许读取 uploads 目录中的文件
+        if _is_under_dir(stored_path, uploads_root):
+            candidates.append(stored_path)
+
+    file_name = (doc.get("file_name") or "").strip()
+    if file_name:
+        ext = Path(file_name).suffix or ""
+        safe_stem = _safe_filename_stem(Path(file_name).stem)
+        candidates.append(app_upload_dir / f"{safe_stem}_{file_id}{ext}")
+
+    # 去重并查找第一个存在的文件
+    unique_candidates: List[Path] = []
+    seen = set()
+    for c in candidates:
+        key = str(c)
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(c)
+
+    path = next((p for p in unique_candidates if p.exists() and p.is_file()), None)
+    if path is None:
+        raise HTTPException(status_code=404, detail="uploads目录下文件不存在")
+
+    filename = doc.get("file_name") or path.name
+    return FileResponse(path=str(path), filename=filename, media_type="application/octet-stream")
 
 
 @router.delete("/files/{file_id}", summary="删除文件（可选删除物理文件，自动解绑 sessions）")

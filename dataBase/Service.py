@@ -47,6 +47,45 @@ class FileService:
     def delete_file_info(self, file_id: str) -> int:
         return self.crud.delete_document(self.collection, {"_id": file_id})
 
+    def update_processing_status(
+        self,
+        file_id: str,
+        app_id: str,
+        processing_status: str,
+        processing_stage: str,
+        processing_message: str = "",
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        query: Dict[str, Any] = {"_id": file_id}
+        if app_id:
+            query["app_id"] = app_id
+
+        patch: Dict[str, Any] = {
+            "processing_status": processing_status,
+            "processing_stage": processing_stage,
+            "processing_message": processing_message,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if extra_fields:
+            patch.update(extra_fields)
+
+        return self.crud.update_document(self.collection, query, patch)
+
+    def get_processing_status(self, file_id: str, app_id: str = "") -> Optional[Dict[str, Any]]:
+        doc = self.get_file_info(file_id, app_id=app_id)
+        if not doc:
+            return None
+        return {
+            "app_id": doc.get("app_id", ""),
+            "file_id": doc.get("file_id", file_id),
+            "file_name": doc.get("file_name", ""),
+            "processing_status": doc.get("processing_status", "unknown"),
+            "processing_stage": doc.get("processing_stage"),
+            "processing_message": doc.get("processing_message"),
+            "updated_at": doc.get("updated_at"),
+            "upload_time": doc.get("upload_time"),
+        }
+
 
 class MemoryService:
     def __init__(self):
