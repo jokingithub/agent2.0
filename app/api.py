@@ -165,18 +165,12 @@ async def _save_chat_log(
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
 
 def _build_session_file_refs(session_service: SessionService, session_id: str, app_id: str) -> list[dict[str, Any]]:
-    """
-    取当前 session 挂靠文件，精简为:
-    - file_id
-    - file_name
-    - main_info
-    """
     files = session_service.get_session_files_content(session_id, app_id=app_id) or []
     result: list[dict[str, Any]] = []
 
     for f in files:
         result.append({
-            "file_id": f.get("file_id") or f.get("_id") or "",
+            "file_id": f.get("file_id") or "",      # 优先用 file_id 字段
             "file_name": f.get("file_name") or "",
             "main_info": f.get("main_info") or {},
         })

@@ -13,32 +13,42 @@ class FileService:
         self.crud = CRUD(Database.get_session)
         self.collection = "files"
 
+    def _file_query(self, file_id: str, app_id: str = "") -> Dict[str, str]:
+        """构建 file_id + app_id 的查询条件"""
+        query = {"file_id": file_id}
+        if app_id:
+            query["app_id"] = app_id
+        return query
+
     def get_file_info(self, file_id: str, app_id: str = None) -> Optional[Dict]:
-        doc = self.crud.find_one(self.collection, {"_id": file_id})
-        if doc and app_id and doc.get("app_id", "") != app_id:
-            return None
-        return doc
+        query = {"file_id": file_id}
+        if app_id:
+            query["app_id"] = app_id
+        return self.crud.find_one(self.collection, query)
 
     def get_files_by_app(self, app_id: str) -> List[Dict]:
         return self.crud.find_documents(self.collection, {"app_id": app_id})
 
     def save_file_info(self, file_info: FileModel) -> str:
-        doc = file_info.model_dump(by_alias=True, exclude_none=True, exclude={'id'})
-        doc["_id"] = file_info.file_id
-
-        if hit := self.crud.find_one(self.collection, {"_id": file_info.file_id}):
-            # 兼容历史数据：旧记录 app_id 为空时，使用本次上传的 app_id 回填
-            hit_app_id = (hit.get("app_id") or "").strip()
-            new_app_id = (file_info.app_id or "").strip()
-            if not hit_app_id and new_app_id:
-                self.crud.update_document(
-                    self.collection,
-                    {"_id": file_info.file_id},
-                    {"app_id": new_app_id}
-                )
+        """保存文件信息，按 file_id + app_id 去重"""
+        query = self._file_query(file_info.file_id, file_info.app_id)
+        hit = self.crud.find_one(self.collection, query)
+        if hit:
             return hit["_id"]
 
+        doc = file_info.model_dump(by_alias=True, exclude_none=True, exclude={'id'})
+        doc.pop("_id", None)  # 确保不带 _id，让数据库自动生成
         return self.crud.insert_document(self.collection, doc)
+
+    def update_file_info(self, file_id: str, update_data: FileModel, app_id: str = "") -> int:
+        query = self._file_query(file_id, app_id)
+        data = update_data.model_dump(exclude_none=True, exclude={'id', 'file_id'})
+        return self.crud.update_document(self.collection, query, data)
+
+    def delete_file_info(self, file_id: str, app_id: str = "") -> int:
+        query = self._file_query(file_id, app_id)
+        return self.crud.delete_document(self.collection, query)
+
 
     def update_file_info(self, file_id: str, update_data: FileModel) -> int:
         data = update_data.model_dump(exclude_none=True, exclude={'id', 'file_id'})
@@ -357,7 +367,8 @@ class SessionService:
         else:
             target_ids = session.file_list
 
-        file_query: Dict[str, Any] = {"_id": {"$in": target_ids}}
+        # ===== 改动：用 file_id 字段查，不再用 _id =====
+        file_query: Dict[str, Any] = {"file_id": {"$in": target_ids}}
         if app_id:
             file_query["app_id"] = app_id
 

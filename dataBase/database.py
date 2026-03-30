@@ -92,6 +92,7 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_files_app_id ON files ((data->>'app_id'));
                     CREATE INDEX IF NOT EXISTS idx_sessions_app_id ON sessions ((data->>'app_id'));
                     CREATE INDEX IF NOT EXISTS idx_memories_app_id ON memories ((data->>'app_id'));
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_files_app_file ON files ((COALESCE(data->>'app_id','')), (data->>'file_id'));
                 """))
 
                 # 配置表索引
