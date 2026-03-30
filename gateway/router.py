@@ -7,9 +7,15 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from app.Schema import ChatRequest
 from gateway.auth import require_token
-from gateway.schemas import ToolInvokeRequest, FileInfo
+from gateway.schemas import (
+    ToolInvokeRequest,
+    FileInfo,
+    WhitelistReplaceRequest,
+    WhitelistItemRequest,
+)
 from gateway.store import GatewayConfigStore
 from typing import Any, Dict, List
+from dataBase.ConfigService import GatewayEnvService
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 protected_router = APIRouter(
@@ -18,6 +24,79 @@ protected_router = APIRouter(
     dependencies=[Depends(require_token)],
 )
 store = GatewayConfigStore()
+gateway_env_service = GatewayEnvService()
+
+
+def _normalize_origin(origin: str) -> str:
+    v = (origin or "").strip()
+    if not v:
+        raise HTTPException(status_code=400, detail="origin 不能为空")
+
+    if v == "*":
+        return v
+
+    v = v.rstrip("/")
+    if not (v.startswith("http://") or v.startswith("https://")):
+        raise HTTPException(status_code=400, detail="origin 必须以 http:// 或 https:// 开头，或使用 *")
+
+    return v
+
+
+def _dedup_keep_order(items: List[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _save_whitelist(whitelist: List[str]) -> None:
+    current = gateway_env_service.get_current()
+    if current:
+        gateway_env_service.update(current["_id"], {"whitelist": whitelist})
+    else:
+        gateway_env_service.create(gateway_env_service.model_class(port=8000, whitelist=whitelist))
+
+
+@router.get("/whitelist")
+def get_whitelist() -> Dict[str, List[str]]:
+    env = gateway_env_service.get_current() or {}
+    wl = env.get("whitelist") or []
+    return {"whitelist": wl}
+
+
+@router.put("/whitelist")
+def replace_whitelist(req: WhitelistReplaceRequest) -> Dict[str, Any]:
+    normalized = [_normalize_origin(x) for x in req.whitelist]
+    normalized = _dedup_keep_order(normalized)
+    _save_whitelist(normalized)
+    return {"message": "白名单更新成功", "whitelist": normalized}
+
+
+@router.post("/whitelist")
+def add_whitelist_item(req: WhitelistItemRequest) -> Dict[str, Any]:
+    origin = _normalize_origin(req.origin)
+    env = gateway_env_service.get_current() or {}
+    wl = env.get("whitelist") or []
+    new_wl = _dedup_keep_order([*wl, origin])
+    _save_whitelist(new_wl)
+    return {"message": "白名单新增成功", "whitelist": new_wl}
+
+
+@router.delete("/whitelist")
+def remove_whitelist_item(origin: str = Query(..., min_length=1)) -> Dict[str, Any]:
+    target = _normalize_origin(origin)
+    env = gateway_env_service.get_current() or {}
+    wl = env.get("whitelist") or []
+
+    if target not in wl:
+        raise HTTPException(status_code=404, detail="白名单项不存在")
+
+    new_wl = [x for x in wl if x != target]
+    _save_whitelist(new_wl)
+    return {"message": "白名单删除成功", "whitelist": new_wl}
 
 
 def _is_local_ip(ip: str) -> bool:

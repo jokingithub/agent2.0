@@ -16,3 +16,11 @@ class FileInfo(BaseModel):
     upload_time: str
     _id: str
     main_info: Dict[str, Any] = None
+
+
+class WhitelistReplaceRequest(BaseModel):
+    whitelist: List[str] = Field(default_factory=list, description="完整白名单列表（支持 http/https 源或 *）")
+
+
+class WhitelistItemRequest(BaseModel):
+    origin: str = Field(..., min_length=1, description="单个白名单源（例如 http://localhost:3000）")
