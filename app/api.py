@@ -251,6 +251,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
     ):
         for node_name, node_value in output.items():
             event: dict[str, Any] = {"node": node_name}
+            if isinstance(node_value, dict):
+              # Supervisor 返回 role + 即将路由的 sub_agent
+              if node_name == "Supervisor":
+                  role_name = node_value.get("role_name")
+                  if role_name:
+                      event["role"] = role_name
+                  if node_value.get("current_agent"):
+                      event["sub_agent"] = node_value["current_agent"]
+
+              # Generic 执行节点返回当前 sub_agent
+              if node_name in ("GenericAgentRunner", "GenericToolRunner"):
+                  if node_value.get("current_agent"):
+                      event["sub_agent"] = node_value["current_agent"]
             if node_name == "Supervisor" and isinstance(node_value, dict):
                 role_name = node_value.get("role_name")
                 if role_name:
@@ -341,6 +354,19 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         ):
             for node_name, node_value in output.items():
                 payload: dict[str, Any] = {"node": node_name}
+                if isinstance(node_value, dict):
+                  # Supervisor 返回 role + 即将路由的 sub_agent
+                  if node_name == "Supervisor":
+                      role_name = node_value.get("role_name")
+                      if role_name:
+                          payload["role"] = role_name
+                      if node_value.get("current_agent"):
+                          payload["sub_agent"] = node_value["current_agent"]
+
+                  # Generic 执行节点返回当前 sub_agent
+                  if node_name in ("GenericAgentRunner", "GenericToolRunner"):
+                      if node_value.get("current_agent"):
+                          payload["sub_agent"] = node_value["current_agent"]
                 if node_name == "Supervisor" and isinstance(node_value, dict):
                     role_name = node_value.get("role_name")
                     if role_name:

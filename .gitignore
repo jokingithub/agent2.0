@@ -43,6 +43,9 @@ sessions/
 
 test_data/
 
+
+logs/docker-compose.yml
+
 logs/
 
 uploads/
