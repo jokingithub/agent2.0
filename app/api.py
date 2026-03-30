@@ -21,6 +21,8 @@ from app.session_api import router as session_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
 from fastapi.middleware.cors import CORSMiddleware  # 1. 导入中间件
+from app.file_api import router as file_router
+
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -40,6 +42,7 @@ app = FastAPI(
 )
 app.include_router(config_router)
 app.include_router(session_router)
+app.include_router(file_router)
 graph = create_graph()
 
 
