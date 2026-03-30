@@ -21,3 +21,5 @@ class AgentState(TypedDict):
     role_config: Optional[Dict[str, Any]]
     # 当前 role 下可路由的 sub_agent 名称列表
     available_sub_agents: Optional[List[str]]
+    session_files: Optional[List[Dict[str, Any]]]
+    role_name: Optional[str]
