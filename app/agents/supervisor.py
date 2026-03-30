@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage
 
 from app.core.llm import get_model, get_model_by_level_id
-from app.core.agents_config import AGENT_REGISTRY, ROUTABLE_NEXT
+from app.core.agents_config import AGENT_REGISTRY
 from dataBase.ConfigService import SceneService, RoleService, SubAgentService
 from logger import logger
 
@@ -140,6 +140,8 @@ def supervisor_node(state):
             system_prompt = ""
             model_id = None
 
+    role_name = role.get("name") if role else "fallback"
+
     # 默认提示词兜底
     if not system_prompt:
         system_prompt = (
@@ -162,11 +164,11 @@ def supervisor_node(state):
 
     logger.info(
         f"Supervisor: scene='{scene_id}', "
-        f"role='{role.get('name') if role else 'fallback'}', "
+        f"role='{role_name}', "
         f"sub_agents={sub_agent_names}"
     )
 
-    # ---- Step 4: 快速终止（上一条是 sub_agent 的 AIMessage，任务已完成） ----
+    # ---- Step 4: 快速终止（上一条是 sub_agent 的 AIMessage，任务已完成）----
     if messages:
         last = messages[-1]
         if isinstance(last, AIMessage):
@@ -175,14 +177,10 @@ def supervisor_node(state):
             if (not has_tools) and content.strip():
                 return {
                     "next": "FINISH",
-                    "session_id": state.get("session_id", "default"),
-                    "app_id": state.get("app_id", ""),
-                    "scene_id": scene_id,
-                    "role_config": role,
-                    "available_sub_agents": sub_agent_names,
+                    "role_name": role_name,
                 }
 
-    # ---- Step 5: 路由决策（一次 LLM 调用：直接回答 or 路由到 sub_agent） ----
+    # ---- Step 5: 路由决策（一次 LLM 调用：直接回答 or 路由到 sub_agent）----
     llm_decision = llm_base.with_structured_output(SupervisorDecision)
 
     route_prompt = (
@@ -210,22 +208,17 @@ def supervisor_node(state):
             return {
                 "messages": [AIMessage(content=decision.answer)],
                 "next": "FINISH",
-                "session_id": state.get("session_id", "default"),
-                "app_id": state.get("app_id", ""),
-                "scene_id": scene_id,
-                "role_config": role,
-                "available_sub_agents": sub_agent_names,
+                "role_name": role_name,
             }
+
+        return {
+            "next": next_node,
+            "role_name": role_name,
+        }
 
     except Exception as e:
         logger.error(f"路由决策失败: {e}，默认 FINISH")
-        next_node = "FINISH"
-
-    return {
-        "next": next_node,
-        "session_id": state.get("session_id", "default"),
-        "app_id": state.get("app_id", ""),
-        "scene_id": scene_id,
-        "role_config": role,
-        "available_sub_agents": sub_agent_names,
-    }
+        return {
+            "next": "FINISH",
+            "role_name": role_name,
+        }

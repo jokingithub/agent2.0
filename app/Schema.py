@@ -7,6 +7,7 @@ from typing import Optional, Any, List, Dict
 from datetime import datetime, timezone
 from langchain_core.callbacks import BaseCallbackHandler
 from typing import Optional, List, Dict, Any
+from logger import logger
 
 class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话 ID")
@@ -71,6 +72,7 @@ class MCPToolSyncRequest(BaseModel):
 class UsageCollector(BaseCallbackHandler):
     """
     收集每次 LLM 调用的 token + 模型 + agent(node)
+    并实时打印到终端
     """
     def __init__(self):
         super().__init__()
@@ -84,13 +86,15 @@ class UsageCollector(BaseCallbackHandler):
         self._current_model: str = "unknown"
         self._current_agent: str = "unknown"
 
+        self.error_count: int = 0
+        self.last_error: str = ""
+
     def on_llm_start(self, serialized, prompts=None, *, invocation_params=None, **kwargs):
         if self.first_token_time is None:
             self.first_token_time = datetime.now(timezone.utc)
 
         self._seq += 1
 
-        # 1) model 名
         model_name = None
         if invocation_params:
             model_name = invocation_params.get("model") or invocation_params.get("model_name")
@@ -99,16 +103,18 @@ class UsageCollector(BaseCallbackHandler):
             model_name = kw.get("model") or kw.get("model_name")
         self._current_model = model_name or "unknown"
 
-        # 2) agent 名（LangGraph 注入）
         metadata = kwargs.get("metadata", {}) or {}
         self._current_agent = metadata.get("langgraph_node", "unknown")
+
+        logger.info(
+            f"[TOKEN][START] seq={self._seq} agent={self._current_agent} model={self._current_model}"
+        )
 
     def on_llm_end(self, response, **kwargs):
         call_prompt = 0
         call_completion = 0
         call_total = 0
 
-        # 优先 llm_output
         try:
             if response and hasattr(response, "llm_output") and response.llm_output:
                 usage = response.llm_output.get("token_usage") or response.llm_output.get("usage") or {}
@@ -118,7 +124,6 @@ class UsageCollector(BaseCallbackHandler):
         except Exception:
             pass
 
-        # 兜底 generations
         if call_total == 0:
             try:
                 if response and hasattr(response, "generations"):
@@ -138,12 +143,25 @@ class UsageCollector(BaseCallbackHandler):
 
         self.call_details.append({
             "seq": self._seq,
-            "agent": self._current_agent,   # 你要的字段
+            "agent": self._current_agent,
             "model": self._current_model,
             "prompt_tokens": call_prompt,
             "completion_tokens": call_completion,
             "total_tokens": call_total,
         })
+
+        logger.info(
+            f"[TOKEN][END] seq={self._seq} agent={self._current_agent} model={self._current_model} "
+            f"prompt={call_prompt} completion={call_completion} total={call_total} "
+            f"acc_total={self.total_tokens}"
+        )
+
+    def on_llm_error(self, error, **kwargs):
+        self.error_count += 1
+        self.last_error = str(error)
+        logger.error(
+            f"[TOKEN][ERROR] seq={self._seq} agent={self._current_agent} model={self._current_model} err={error}"
+        )
 
     @property
     def final_model(self) -> Optional[str]:
@@ -156,6 +174,7 @@ class UsageCollector(BaseCallbackHandler):
         if not self.call_details:
             return None
         return self.call_details[-1].get("agent")
+
 # ============================================================
 # Session & Memory 管理接口请求模型
 # ============================================================

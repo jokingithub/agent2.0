@@ -79,11 +79,19 @@ def health() -> dict[str, str]:
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(
     session_id: str = Form(..., description="会话 ID"),
-    app_id: str = Form(..., min_length=1, description="应用 ID（必填）"),
+    app_id: str = Form("", description="应用 ID"),
     file: UploadFile = File(..., description="上传的文件")
 ) -> UploadResponse:
+    session_service = SessionService()
     try:
+        # 关键：上传前确保会话存在
+        session_service.ensure_session(session_id, app_id=app_id)
+
         result = await save_file(file, session_id, app_id=app_id)
+
+        # 上传成功后刷新会话活跃时间
+        session_service.touch_session(session_id, app_id=app_id)
+
         return UploadResponse(**result)
     except Exception as e:
         logger.error(f"文件处理失败: {str(e)}", exc_info=False)
@@ -156,6 +164,41 @@ async def _save_chat_log(
     except Exception as e:
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
 
+def _build_session_file_refs(session_service: SessionService, session_id: str, app_id: str) -> list[dict[str, Any]]:
+    """
+    取当前 session 挂靠文件，精简为:
+    - file_id
+    - file_name
+    - main_info
+    """
+    files = session_service.get_session_files_content(session_id, app_id=app_id) or []
+    result: list[dict[str, Any]] = []
+
+    for f in files:
+        result.append({
+            "file_id": f.get("file_id") or f.get("_id") or "",
+            "file_name": f.get("file_name") or "",
+            "main_info": f.get("main_info") or {},
+        })
+    return result
+
+def _print_request_token_summary(
+    endpoint: str,
+    session_id: str,
+    app_id: str,
+    scene_id: str,
+    collector: UsageCollector,
+):
+    logger.info(
+        f"[TOKEN][REQ] endpoint={endpoint} app_id={app_id} scene_id={scene_id} session_id={session_id} "
+        f"calls={len(collector.call_details)} total={collector.total_tokens} "
+        f"prompt={collector.prompt_tokens} completion={collector.completion_tokens} "
+        f"final_model={collector.final_model} final_agent={collector.final_agent} "
+        f"errors={collector.error_count}"
+    )
+    if collector.last_error:
+        logger.info(f"[TOKEN][REQ][LAST_ERROR] {collector.last_error}")
+
 
 
 # ============================================================
@@ -178,6 +221,13 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
 
     messages = [(msg["role"], msg["content"]) for msg in history]
+    session_files = _build_session_file_refs(session_service, req.session_id, app_id)
+    if session_files:
+        messages.append((
+            "system",
+            "当前会话已挂靠文件信息如下:\n"
+            + json.dumps(session_files, ensure_ascii=False)
+        ))
     messages.append(("user", req.message))
 
     inputs = {
@@ -185,6 +235,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         "app_id": app_id,
         "scene_id": req.scene_id or "default",
         "messages": messages,
+        "session_files": session_files,
     }
 
     events: list[dict[str, Any]] = []
@@ -200,6 +251,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
     ):
         for node_name, node_value in output.items():
             event: dict[str, Any] = {"node": node_name}
+            if node_name == "Supervisor" and isinstance(node_value, dict):
+                role_name = node_value.get("role_name")
+                if role_name:
+                    event["role"] = role_name
             node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
             if node_messages:
                 last = node_messages[-1]
@@ -208,6 +263,14 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 if isinstance(content, str) and content.strip():
                     final_message = content
             events.append(event)
+    _print_request_token_summary(
+      endpoint="/chat",
+      session_id=req.session_id,
+      app_id=app_id,
+      scene_id=req.scene_id or "default",
+      collector=collector,
+    ) 
+
 
     asyncio.create_task(_save_chat_log(
         app_id=app_id,
@@ -248,6 +311,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     )
 
     messages = [(msg["role"], msg["content"]) for msg in history]
+    session_files = _build_session_file_refs(session_service, req.session_id, app_id)
+    if session_files:
+        messages.append((
+            "system",
+            "当前会话已挂靠文件信息如下（仅供参考，按需使用）:\n"
+            + json.dumps(session_files, ensure_ascii=False)
+        ))
     messages.append(("user", req.message))
 
     inputs = {
@@ -255,6 +325,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         "app_id": app_id,
         "scene_id": req.scene_id or "default",
         "messages": messages,
+        "session_files": session_files,
     }
 
     async def event_gen():
@@ -270,6 +341,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         ):
             for node_name, node_value in output.items():
                 payload: dict[str, Any] = {"node": node_name}
+                if node_name == "Supervisor" and isinstance(node_value, dict):
+                    role_name = node_value.get("role_name")
+                    if role_name:
+                        payload["role"] = role_name
                 node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
                 if node_messages:
                     last = node_messages[-1]
@@ -278,6 +353,14 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if isinstance(content, str) and content.strip():
                         final_message = content
                 yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        
+        _print_request_token_summary(
+            endpoint="/chat/stream",
+            session_id=req.session_id,
+            app_id=app_id,
+            scene_id=req.scene_id or "default",
+            collector=collector,
+        )
 
         # 流结束后写日志
         asyncio.create_task(_save_chat_log(

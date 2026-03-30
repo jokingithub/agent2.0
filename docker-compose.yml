@@ -60,7 +60,7 @@ services:
         BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
     container_name: ai2-gateway
     ports:
-      - "9000:9000"
+      - "19000:9000"
     environment:
       - PYTHONUNBUFFERED=1
       - APP_ENV=${APP_ENV:-debug}
@@ -85,7 +85,7 @@ services:
         BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
     container_name: mcp-service
     ports:
-      - "9001:9001"
+      - "19001:9001"
     environment:
       - PYTHONUNBUFFERED=1
       - PG_URI=${PG_URI:-postgresql://${PG_USER:-agent}:${PG_PASSWORD:-agent123}@pgsql:5432/${PG_DB:-agent}}

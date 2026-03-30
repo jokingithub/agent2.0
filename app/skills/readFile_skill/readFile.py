@@ -1,12 +1,16 @@
 from langchain_core.tools import tool
-from pathlib import Path
-from typing import Annotated
-from langgraph.prebuilt import InjectedState
 from dataBase.Service import FileService
 
 @tool
-def read_file(file_id: str) -> str:
-    """读取当前 session 目录内文件内容（支持相对路径，禁止越界）。"""
+def read_file_content(file_id: str) -> str:
+    """读取指定文件的完整内容。
+
+    Args:
+        file_id: 文件ID
+
+    Returns:
+        文件内容字符串，如果文件不存在则返回错误信息
+    """
     file_service = FileService()
 
     try:
@@ -14,9 +18,11 @@ def read_file(file_id: str) -> str:
         if not file_info:
             return f"未找到文件 ID: {file_id}"
 
-        # 直接返回数据库中存储的内容
-        data = {"file_name": file_info["file_name"], "content": file_info["content"]}
-        return data
+        content = file_info.get("content", "")
+        if not content:
+            return f"文件 {file_info.get('file_name', file_id)} 内容为空"
+
+        return content
+
     except Exception as e:
         return f"读取文件错误: {e}"
-    

@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 from typing import List, Any
 from langchain_core.tools import Tool, BaseTool
+import importlib
 from logger import logger
 
 # 假设这些服务已经存在
@@ -13,6 +14,25 @@ _tool_service = ToolService()
 _skill_service = SkillService()
 _sub_agent_service = SubAgentService()
 
+def _load_callable(entrypoint: str):
+    """动态加载 Python 可调用对象
+
+    Args:
+        entrypoint: 格式 "module.path:callable_name"
+
+    Returns:
+        加载的函数或工具对象
+    """
+    if ":" not in entrypoint:
+        raise ValueError(f"entrypoint 格式错误，应为 'module:callable'，实际: {entrypoint}")
+
+    module_path, callable_name = entrypoint.rsplit(":", 1)
+
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, callable_name)
+    except (ImportError, AttributeError) as e:
+        raise ImportError(f"无法加载 {entrypoint}: {e}")
 
 def load_skill_as_tool(skill_dir: str) -> BaseTool:
     """从技能目录加载本地工具（*.py 中由 @tool 装饰导出的对象）。"""
@@ -118,23 +138,47 @@ def _create_mcp_tool(tool_config: dict) -> Tool:
     )
 
 def load_tool_from_config(tool_id: str, sub_agent_id: str | None = None) -> Tool | None:
-    """加载单个工具入口"""
+    """从 tools 表加载单个工具"""
     tool_config = _tool_service.get_by_id(tool_id)
-    if not _is_tool_exposed_to_agent(tool_config, sub_agent_id):
-        if tool_config:
-            logger.info(
-                f"工具未暴露给子Agent，跳过: tool={tool_config.get('name')} agent={sub_agent_id}"
-            )
+    if not tool_config:
+        logger.warning(f"tools 表未找到工具: {tool_id}")
         return None
 
-    t_type = str(tool_config.get("type", "")).lower()
-    
-    # 只要是 mcp 或 http 类型，统一走 MCP 协议调用
-    if t_type in ["mcp", "http"]:
+    # 检查工具是否对该 sub_agent 可见
+    if not _is_tool_exposed_to_agent(tool_config, sub_agent_id):
+        return None
+
+    if not tool_config.get("enabled", True):
+        logger.info(f"工具 '{tool_config.get('name')}' 已禁用，跳过")
+        return None
+
+    tool_type = tool_config.get("type", "")
+
+    if tool_type == "local":
+        entrypoint = tool_config.get("config", {}).get("entrypoint")
+        if not entrypoint:
+            logger.warning(f"local 工具缺少 entrypoint: {tool_config.get('name')}")
+            return None
+        try:
+            loaded = _load_callable(entrypoint)
+            if isinstance(loaded, BaseTool):
+                return loaded
+            return Tool(
+                name=tool_config.get("name", "unknown"),
+                description=tool_config.get("description", ""),
+                func=loaded
+            )
+        except Exception as e:
+            logger.error(f"加载 local 工具失败: {e}")
+            return None
+
+    elif tool_type == "mcp":
         return _create_mcp_tool(tool_config)
-    
-    logger.warning(f"跳过不支持的工具类型: {t_type}")
-    return None
+    elif tool_type == "http":
+        return _create_http_tool(tool_config)
+    else:
+        logger.warning(f"未知工具类型 '{tool_type}'，工具: {tool_config.get('name')}")
+        return None
 
 def load_tools_for_sub_agent(sub_agent_id: str) -> List[Tool]:
     """为子 Agent 加载所有关联工具"""
