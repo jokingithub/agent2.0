@@ -67,6 +67,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="OCR Service", lifespan=lifespan)
 
+
+@app.get("/health")
+async def health() -> dict:
+    """OCR 服务健康检查：用于判断 OCR 是否可用"""
+    available = ocr_executor is not None
+    return {
+        "status": "ok" if available else "not_ready",
+        "ocr_available": available,
+    }
+
 @app.post("/ocr/process", response_model=OCRResponse)
 async def process_ocr(request: OCRRequest):
     try:
