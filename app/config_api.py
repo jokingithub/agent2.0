@@ -22,7 +22,9 @@ from dataBase.Schema import (
 )
 from app.Schema import (
     GatewayAppCreateRequest,ModelConnectionCreateRequest,ModelConnectionUpdateRequest,
-    MCPToolSyncRequest
+    MCPToolSyncRequest,
+    WhitelistReplaceRequest,
+    WhitelistItemRequest,
 )
 from logger import logger
 from pathlib import Path as FilePath
@@ -136,6 +138,41 @@ def get_system_logs(
 # --- 网关环境（单例） ---
 _gateway_env_service = GatewayEnvService()
 
+
+def _normalize_origin(origin: str) -> str:
+    value = (origin or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="origin 不能为空")
+    if value == "*":
+        return value
+    if not (value.startswith("http://") or value.startswith("https://")):
+        raise HTTPException(status_code=400, detail="origin 必须以 http:// 或 https:// 开头，或使用 *")
+    return value.rstrip("/")
+
+
+def _dedup_keep_order(values: List[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for v in values:
+        if v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result
+
+
+def _save_whitelist(new_whitelist: List[str]) -> Dict[str, Any]:
+    current = _gateway_env_service.get_current() or {}
+    model = GatewayEnvModel(
+        port=int(current.get("port", 8000)),
+        whitelist=new_whitelist,
+    )
+    doc_id = _gateway_env_service.save(model)
+    return {
+        "id": doc_id,
+        "port": model.port,
+        "whitelist": model.whitelist,
+    }
+
 @router.get("/gateway-env", summary="获取网关环境配置")
 def get_gateway_env():
     result = _gateway_env_service.get_current()
@@ -147,6 +184,60 @@ def get_gateway_env():
 def update_gateway_env(data: GatewayEnvModel):
     doc_id = _gateway_env_service.save(data)
     return {"id": doc_id, "message": "网关环境配置更新成功"}
+
+
+@router.get("/gateway-env/whitelist", summary="获取白名单")
+def get_gateway_whitelist():
+    current = _gateway_env_service.get_current() or {}
+    whitelist = current.get("whitelist") or []
+    if not isinstance(whitelist, list):
+        whitelist = []
+    return {"whitelist": whitelist}
+
+
+@router.put("/gateway-env/whitelist", summary="替换白名单")
+def replace_gateway_whitelist(data: WhitelistReplaceRequest):
+    normalized = _dedup_keep_order([_normalize_origin(x) for x in data.whitelist])
+    return _save_whitelist(normalized)
+
+
+@router.post("/gateway-env/whitelist", summary="新增白名单项")
+def add_gateway_whitelist_item(data: WhitelistItemRequest):
+    current = _gateway_env_service.get_current() or {}
+    existing = current.get("whitelist") or []
+    if not isinstance(existing, list):
+        existing = []
+
+    target = _normalize_origin(data.origin)
+    if target in existing:
+        return {
+            "message": "白名单项已存在",
+            "whitelist": existing,
+        }
+
+    existing.append(target)
+    normalized = _dedup_keep_order(existing)
+    result = _save_whitelist(normalized)
+    result["message"] = "白名单项新增成功"
+    return result
+
+
+@router.delete("/gateway-env/whitelist", summary="删除白名单项")
+def remove_gateway_whitelist_item(origin: str):
+    target = _normalize_origin(origin)
+
+    current = _gateway_env_service.get_current() or {}
+    existing = current.get("whitelist") or []
+    if not isinstance(existing, list):
+        existing = []
+
+    if target not in existing:
+        raise HTTPException(status_code=404, detail="白名单项不存在")
+
+    new_whitelist = [x for x in existing if x != target]
+    result = _save_whitelist(new_whitelist)
+    result["message"] = "白名单项删除成功"
+    return result
 
 
 # --- 网关鉴权验证 ---

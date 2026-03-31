@@ -5,7 +5,6 @@
 import hashlib
 import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Any
 from datetime import datetime
@@ -29,41 +28,33 @@ def _write_upload_file(
     content_bytes: bytes,
     origin_name: str,
     app_id: str,
-    session_id: str,
     file_id: str,
-) -> tuple[str, bool]:
+) -> str:
     """
-    写入上传文件并返回路径
-    返回: (file_path, is_temp_file)
+    写入上传文件到持久目录并返回路径。
 
     规则：
-    1) 未配置 FILE_STORAGE_ROOT：保持现有行为 -> 写 /tmp 临时文件
-    2) 配置了 FILE_STORAGE_ROOT：写持久目录 -> {root}/{app_id}/{session_id}/{safe_name}_{file_id}{ext}
+    - 默认写入项目目录下 uploads/
+    - 可通过 FILE_STORAGE_ROOT 覆盖根目录
+    - 按 app_id 分层：{root}/{app_id}/{safe_name}_{file_id}{ext}
     """
     storage_root = os.getenv("FILE_STORAGE_ROOT", "").strip()
+    if storage_root:
+        root_path = Path(storage_root).resolve()
+    else:
+        project_root = Path(__file__).resolve().parents[1]
+        root_path = (project_root / "uploads").resolve()
 
-    # 未配置：保持当前 /tmp 行为
-    if not storage_root:
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=Path(origin_name).suffix or "",
-            dir=tempfile.gettempdir(),
-        ) as tmp_file:
-            tmp_file.write(content_bytes)
-            return tmp_file.name, True
-
-    # 已配置：持久目录
-    root_path = Path(storage_root).resolve()
     ext = Path(origin_name).suffix or ""
     safe_stem = _safe_filename(Path(origin_name).stem)
     file_name = f"{safe_stem}_{file_id}{ext}"
-    target_path = root_path / (app_id or "default") / session_id / file_name
+    target_path = root_path / (app_id or "default") / file_name
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(target_path, "wb") as f:
         f.write(content_bytes)
 
-    return str(target_path), False
+    return str(target_path)
 
 
 async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
@@ -90,64 +81,124 @@ async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
                 "message": "文件已存在，返回已有信息",
             }
 
+        # 新文件：先创建一条“处理中”记录，便于前端轮询处理状态
+        initial_doc = FileModel(
+            app_id=app_id,
+            file_id=file_id,
+            file_name=file.filename,
+            file_type=[],
+            content="",
+            processing_status="processing",
+            processing_stage="received",
+            processing_message="文件已接收，等待处理",
+            upload_time=datetime.now(),
+        )
+        file_service.save_file_info(initial_doc)
+
+
         # 写文件（tmp 或持久目录）
-        file_path, is_temp_file = _write_upload_file(
+        file_path = _write_upload_file(
             content_bytes=content_bytes,
             origin_name=file.filename,
             app_id=app_id,
-            session_id=session_id,
             file_id=file_id,
         )
 
-        try:
-            # 用写入后的路径做解析（日志会打印这个路径）
-            extracted_content = extract_content(file_path)
-            file_type = classify_file(extracted_content)
+        # 用写入后的路径做解析（日志会打印这个路径）
+        file_service.update_processing_status(
+            file_id=file_id,
+            app_id=app_id,
+            processing_status="processing",
+            processing_stage="extracting",
+            processing_message="正在提取文件内容",
+            extra_fields={"file_path": file_path},
+        )
+        extracted_content = extract_content(file_path)
 
-            # 要素抽取（多分类合并）
-            element = {}
-            for ft in file_type:
-                result = element_extraction(file_content=extracted_content, file_type=ft)
-                if result and not result.get("_error") and not result.get("_parse_error"):
-                    element.update(result)
-            logger.info(f"要素抽取结果: {element}")
+        file_service.update_processing_status(
+            file_id=file_id,
+            app_id=app_id,
+            processing_status="processing",
+            processing_stage="classifying",
+            processing_message="正在识别文件类型",
+            extra_fields={"content": extracted_content},
+        )
+        file_type = classify_file(extracted_content)
 
-            file_data = FileModel(
-                app_id=app_id,
-                file_id=file_id,
-                file_name=file.filename,
-                file_type=file_type,
-                content=extracted_content,
-                file_path=file_path,  # 新增：存储上传文件路径
-                main_info=element if element else None,
-                upload_time=datetime.now(),
-            )
+        # 要素抽取（多分类合并）
+        file_service.update_processing_status(
+            file_id=file_id,
+            app_id=app_id,
+            processing_status="processing",
+            processing_stage="extracting_elements",
+            processing_message="正在抽取关键信息",
+            extra_fields={"file_type": file_type},
+        )
+        element = {}
+        for ft in file_type:
+            result = element_extraction(file_content=extracted_content, file_type=ft)
+            if result and not result.get("_error") and not result.get("_parse_error"):
+                element.update(result)
+        logger.info(f"要素抽取结果: {element}")
 
-            session_service.add_file_to_session(
-                session_id=session_id,
-                file_info=file_data,
-                app_id=app_id,
-            )
+        file_data = FileModel(
+            app_id=app_id,
+            file_id=file_id,
+            file_name=file.filename,
+            file_type=file_type,
+            content=extracted_content,
+            file_path=file_path,  # 新增：存储上传文件路径
+            main_info=element if element else None,
+            upload_time=datetime.now(),
+        )
 
-            preview = extracted_content[:500] + ("..." if len(extracted_content) > 500 else "")
+        session_service.add_file_to_session(
+            session_id=session_id,
+            file_info=file_data,
+            app_id=app_id,
+        )
 
-            return {
-                "session_id": session_id,
-                "app_id": app_id,
+        file_service.update_processing_status(
+            file_id=file_id,
+            app_id=app_id,
+            processing_status="completed",
+            processing_stage="done",
+            processing_message="文件处理完成",
+            extra_fields={
                 "file_name": file.filename,
-                "file_id": file_id,
                 "file_type": file_type,
-                "content_preview": preview,
-                "message": "文件上传和提取成功",
-            }
+                "content": extracted_content,
+                "main_info": element if element else None,
+                "file_path": file_path,
+            },
+        )
 
-        finally:
-            # 保持当前行为：如果是 /tmp 临时文件，处理完后删除
-            if is_temp_file and os.path.exists(file_path):
-                os.remove(file_path)
+        preview = extracted_content[:500] + ("..." if len(extracted_content) > 500 else "")
+
+        return {
+            "session_id": session_id,
+            "app_id": app_id,
+            "file_name": file.filename,
+            "file_id": file_id,
+            "file_type": file_type,
+            "content_preview": preview,
+            "message": "文件上传和提取成功",
+        }
 
     except Exception as e:
         logger.error(f"文件上传和提取失败: {e}", exc_info=True)
+        try:
+            if 'file_id' in locals():
+                file_service = FileService()
+                file_service.update_processing_status(
+                    file_id=file_id,
+                    app_id=app_id,
+                    processing_status="failed",
+                    processing_stage="error",
+                    processing_message=str(e),
+                )
+        except Exception:
+            pass
         return {
             "session_id": session_id,
             "app_id": app_id,

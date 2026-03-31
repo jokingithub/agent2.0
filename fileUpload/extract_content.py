@@ -74,7 +74,7 @@ def extract_content(file_path):
     """主入口"""
     ext = os.path.splitext(file_path)[1].lower()
     try:
-        if ext == '.docx':
+        if ext in ['.doc', '.docx', '.rtf', '.excel']:
             with open(file_path, "rb") as f:
                 return mammoth.convert_to_markdown(f).value
                 

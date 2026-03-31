@@ -15,6 +15,10 @@ class FileModel(BaseModel):
     content: str
     file_path: Optional[str] = None   # 新增：持久化文件路径
     main_info: Optional[Dict[str, Any]] = None
+    processing_status: str = "completed"   # processing / completed / failed
+    processing_stage: Optional[str] = None  # received / extracting / classifying / extracting_elements / done / error
+    processing_message: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.now)
     upload_time: datetime = Field(default_factory=datetime.now)
 
 class MemoryModel(BaseModel):

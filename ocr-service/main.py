@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # 文件：ocr-service/main.py
-# time: 2026/3/18
 
 import sys
 import os
@@ -8,16 +7,16 @@ import multiprocessing
 import logging
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Any
 from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor
-
+from typing import List, Optional, Any
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from pydantic import BaseModel
+# 导入 CORS 中间件
+from fastapi.middleware.cors import CORSMiddleware
 
-# 导入逻辑
+from Schemas import OCRRequest, OCRResponse
 from OCR.OCR import ocr_pipeline_with_executor
 
 # --- 环境配置 ---
@@ -51,31 +50,38 @@ def convert_to_native(data: Any) -> Any:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ocr_executor
-    # CPU 模式建议设为 CPU核心数/2；如果是 GPU，必须设为 1
     max_workers = 2
     logger.info(f"正在初始化常驻 OCR 进程池 (Workers: {max_workers})...")
     ocr_executor = ProcessPoolExecutor(max_workers=max_workers)
-    
-    # 预热：让子进程在启动时就加载模型
-    # ocr_executor.submit(get_ocr_instance).result() 
-    
     yield
-    
-    # 关闭时清理
     if ocr_executor:
         ocr_executor.shutdown(wait=True)
         logger.info("OCR 进程池已安全关闭")
 
 app = FastAPI(title="OCR Service", lifespan=lifespan)
 
-class OCRRequest(BaseModel):
-    file_path: str
-    batch_size: int = 4
+# --- 新增：CORS 配置 ---
+# 允许访问的源列表
+# 在生产环境下，建议将 ["*"] 替换为具体的域名，例如 ["http://localhost:3000", "https://yourdomain.com"]
+origins = [
+    "*",
+]
 
-class OCRResponse(BaseModel):
-    success: bool
-    data: Optional[List[Any]] = None
-    error: Optional[str] = None
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,           # 允许跨域请求的域名列表
+    allow_credentials=True,          # 允许携带 Cookie
+    allow_methods=["*"],             # 允许的 HTTP 方法 (GET, POST, OPTIONS 等)
+    allow_headers=["*"],             # 允许的 HTTP 请求头
+)
+
+@app.get("/health")
+async def health() -> dict:
+    available = ocr_executor is not None
+    return {
+        "status": "ok" if available else "not_ready",
+        "ocr_available": available,
+    }
 
 @app.post("/ocr/process", response_model=OCRResponse)
 async def process_ocr(request: OCRRequest):
@@ -83,7 +89,6 @@ async def process_ocr(request: OCRRequest):
         if not os.path.exists(request.file_path):
             raise HTTPException(status_code=404, detail=f"文件不存在: {request.file_path}")
         
-        # 使用 run_in_executor 避免阻塞 FastAPI 主循环
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
             None, 
@@ -124,7 +129,6 @@ async def process_ocr_file(file: UploadFile = File(...), batch_size: int = 4):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # 必须在入口处设置 spawn
     if sys.platform != 'linux':
         try:
             multiprocessing.set_start_method('spawn', force=True)
