@@ -340,27 +340,64 @@ async def _fetch_models_from_connection(base_url: str, api_key: str, protocol: s
     logger.warning(f"自动拉取模型失败 protocol={protocol}, base_url={base}, detail={detail}")
     raise RuntimeError(f"自动拉取模型失败：{detail}")
 
-@router.post("/model-connections", summary="创建模型连接（不校验，直接写库）")
+@router.post("/model-connections", summary="创建模型连接（先校验连通性）")
 def create_model_connection(data: ModelConnectionCreateRequest):
+    try:
+        fetched_models = asyncio.run(
+            _fetch_models_from_connection(
+                base_url=data.base_url,
+                api_key=data.api_key,
+                protocol=data.protocol,
+            )
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"模型连接不可用：{e}")
+
+    models = (getattr(data, "models", None) or [])
+    if not models:
+        models = fetched_models
+
     model = ModelConnectionModel(
         protocol=data.protocol,
         base_url=data.base_url,
         api_key=data.api_key,
-        models=getattr(data, "models", []) or [],
+        models=models,
         description=data.description,
     )
     doc_id = _model_connection_service.create(model)
     return {
         "id": doc_id,
-        "message": "模型连接创建成功",
+        "models_count": len(models),
+        "message": "模型连接创建成功（已校验连通性）",
     }
 
 
-@router.put("/model-connections/{doc_id}", summary="更新模型连接（不校验，不自动刷新模型列表）")
+@router.put("/model-connections/{doc_id}", summary="更新模型连接（连接参数变更时校验连通性）")
 def update_model_connection(doc_id: str, data: ModelConnectionUpdateRequest):
     current = _model_connection_service.get_by_id(doc_id)
     if not current:
         raise HTTPException(status_code=404, detail="模型连接不存在")
+
+    protocol = data.protocol if data.protocol is not None else current.get("protocol", "")
+    base_url = data.base_url if data.base_url is not None else current.get("base_url", "")
+    api_key = data.api_key if data.api_key is not None else current.get("api_key", "")
+
+    need_validate = (
+        data.protocol is not None
+        or data.base_url is not None
+        or data.api_key is not None
+    )
+    if need_validate:
+        try:
+            asyncio.run(
+                _fetch_models_from_connection(
+                    base_url=base_url,
+                    api_key=api_key,
+                    protocol=protocol,
+                )
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"模型连接不可用：{e}")
 
     update_data = {}
     if data.protocol is not None:
