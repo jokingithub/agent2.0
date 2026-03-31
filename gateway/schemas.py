@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -15,7 +15,7 @@ class FileInfo(BaseModel):
     file_type: List[str]
     upload_time: str
     _id: str
-    main_info: Dict[str, Any] = None
+    main_info: Optional[Dict[str, Any]] = None
 
 
 class FileProcessingStatus(BaseModel):

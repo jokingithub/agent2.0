@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """统一 Generic Runner（无须为每个 sub_agent 注册图节点）"""
 
+import json
 from typing import Optional, Dict, Any, List
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -13,6 +14,49 @@ from app.core.state import AgentState
 from logger import logger
 
 _sub_agent_service = SubAgentService()
+
+
+def _inject_runtime_app_id(args: Any, app_id: str) -> Any:
+    """将运行时 app_id 注入 tool args。
+
+    兼容：
+    - args 为 dict（顶层或 data 嵌套）
+    - args 为 JSON 字符串
+    """
+    if not app_id:
+        return args
+
+    if isinstance(args, dict):
+        # 1) 嵌套 data 注入（兼容 arg_name=data 的工具）
+        data = args.get("data")
+        if isinstance(data, dict):
+            # 强制以运行时 app_id 为准
+            data["app_id"] = app_id
+            # data 嵌套存在时，不额外注入顶层 app_id，避免下游 schema 校验报多余字段
+            args.pop("app_id", None)
+            return args
+
+        # 2) 非 data 嵌套场景：顶层强制覆盖注入
+        args["app_id"] = app_id
+        return args
+
+    if isinstance(args, str):
+        text = args.strip()
+        if not text:
+            return {"app_id": app_id}
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                parsed.setdefault("app_id", app_id)
+                data = parsed.get("data")
+                if isinstance(data, dict):
+                    data.setdefault("app_id", app_id)
+                return parsed
+        except Exception:
+            pass
+        return {"query": args, "app_id": app_id}
+
+    return {"query": str(args), "app_id": app_id}
 
 
 def _find_sub_agent_by_name(name: str) -> Optional[Dict[str, Any]]:
@@ -95,6 +139,16 @@ async def generic_tool_runner(state: AgentState, config: RunnableConfig):
     tool_calls = getattr(last, "tool_calls", None) if isinstance(last, AIMessage) else None
     if not tool_calls:
         return {"current_agent": state.get("current_agent", "")}
+
+    runtime_app_id = (state.get("app_id") or "").strip()
+    if runtime_app_id:
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            if "args" in tc:
+                tc["args"] = _inject_runtime_app_id(tc.get("args"), runtime_app_id)
+            elif "arguments" in tc:
+                tc["arguments"] = _inject_runtime_app_id(tc.get("arguments"), runtime_app_id)
 
     current_agent = (state.get("current_agent") or "").strip()
     sa = _find_sub_agent_by_name(current_agent) if current_agent else None
