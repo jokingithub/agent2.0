@@ -11,6 +11,8 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from langchain_core.messages import AIMessage, ToolMessage
+
 from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
 from fileUpload.fileUpload import save_file
@@ -20,7 +22,7 @@ from app.config_api import router as config_router
 from app.session_api import router as session_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
-from fastapi.middleware.cors import CORSMiddleware  # 1. 导入中间件
+from fastapi.middleware.cors import CORSMiddleware
 from app.file_api import router as file_router
 
 
@@ -46,25 +48,20 @@ app.include_router(file_router)
 graph = create_graph()
 
 
-# 2. 定义允许的源（即允许哪些前端域名访问）
-# 如果是在开发环境，可以使用 ["*"] 允许所有。在生产环境建议指定具体域名。
 origins = [
     "http://localhost",
-    "http://localhost:3000",  # 常见的 React/Next.js 端口
-    "https://your-frontend-domain.com", 
-    "*", # 临时允许所有来源，方便调试
+    "http://localhost:3000",
+    "https://your-frontend-domain.com",
+    "*",
 ]
 
-# 3. 将中间件添加到 app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,           # 允许跨域的源列表
-    allow_credentials=True,          # 允许携带 Cookie
-    allow_methods=["*"],             # 允许所有的 HTTP 方法 (GET, POST, OPTIONS, 等)
-    allow_headers=["*"],             # 允许所有的请求头
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-
 
 
 # ============================================================
@@ -84,14 +81,9 @@ async def upload_file(
 ) -> UploadResponse:
     session_service = SessionService()
     try:
-        # 关键：上传前确保会话存在
         session_service.ensure_session(session_id, app_id=app_id)
-
         result = await save_file(file, session_id, app_id=app_id)
-
-        # 上传成功后刷新会话活跃时间
         session_service.touch_session(session_id, app_id=app_id)
-
         return UploadResponse(**result)
     except Exception as e:
         logger.error(f"文件处理失败: {str(e)}", exc_info=False)
@@ -103,6 +95,98 @@ async def upload_file(
             content_preview="",
             message=f"文件处理失败: {str(e)}"
         )
+
+
+# ============================================================
+# 消息分类辅助
+# ============================================================
+
+def _classify_message(msg) -> dict[str, Any]:
+    """
+    将 LangChain Message 分类为前端可识别的事件字段。
+    返回 dict 包含: message_type, content, tool_name, tool_call_id
+    """
+    content = getattr(msg, "content", "")
+
+    if isinstance(msg, ToolMessage):
+        tool_name = getattr(msg, "name", "") or ""
+        tool_call_id = getattr(msg, "tool_call_id", "") or ""
+        return {
+            "message_type": "tool",
+            "content": content,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+        }
+
+    if isinstance(msg, AIMessage):
+        # AI 消息带 tool_calls 的是"调用请求"，不是最终回复
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            # 提取调用摘要给前端展示（可选）
+            call_summaries = []
+            for tc in tool_calls:
+                name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                call_summaries.append(name)
+            return {
+                "message_type": "tool_call",
+                "content": content,
+                "tool_names": call_summaries,
+            }
+        # 普通 AI 回复
+        return {
+            "message_type": "assistant",
+            "content": content,
+        }
+
+    # 兜底
+    return {
+        "message_type": "unknown",
+        "content": content,
+    }
+
+
+def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any]]:
+    """
+    从一个节点输出中提取所有消息事件。
+    每条消息独立一个事件，带 message_type 区分。
+    """
+    events = []
+    node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
+    if not node_messages:
+        return events
+
+    for msg in node_messages:
+        classified = _classify_message(msg)
+        content = classified.get("content", "")
+
+        # 跳过空内容的 tool_call 请求（前端不需要看到空的调用指令）
+        if classified["message_type"] == "tool_call" and not content:
+            # 但仍然发一个"正在调用工具"的提示
+            event = {
+                "node": node_name,
+                "message_type": "tool_call",
+                "message": f"正在调用工具: {', '.join(classified.get('tool_names', []))}",
+                "tool_names": classified.get("tool_names", []),
+            }
+            events.append(event)
+            continue
+
+        event: dict[str, Any] = {
+            "node": node_name,
+            "message_type": classified["message_type"],
+            "message": content,
+        }
+
+        if classified["message_type"] == "tool":
+            event["tool_name"] = classified.get("tool_name", "")
+            event["tool_call_id"] = classified.get("tool_call_id", "")
+
+        if classified["message_type"] == "tool_call":
+            event["tool_names"] = classified.get("tool_names", [])
+
+        events.append(event)
+
+    return events
 
 
 # ============================================================
@@ -121,7 +205,6 @@ async def _save_chat_log(
     """异步保存会话日志 + 对话记忆"""
     end_time = datetime.now(timezone.utc)
 
-    # 写 memories（assistant 消息带模型名）
     try:
         session_service = SessionService()
         session_service.append_chat_message(session_id, "user", request_content, app_id=app_id)
@@ -130,13 +213,12 @@ async def _save_chat_log(
                 session_id, "assistant", response_content,
                 app_id=app_id,
                 model_name=collector.final_model or "",
-                agent_name=collector.final_agent or "",   # 新增
+                agent_name=collector.final_agent or "",
             )
         logger.info(f"会话记忆已保存: session={session_id}")
     except Exception as e:
         logger.error(f"保存会话记忆失败: {e}", exc_info=True)
 
-    # 写 chat_logs
     try:
         log_service = ChatLogService()
         log_data = {
@@ -151,7 +233,6 @@ async def _save_chat_log(
             "total_tokens": collector.total_tokens or None,
             "prompt_tokens": collector.prompt_tokens or None,
             "completion_tokens": collector.completion_tokens or None,
-            # ===== 新增：模型追踪 =====
             "model_detail": collector.call_details if collector.call_details else None,
             "final_model": collector.final_model,
         }
@@ -159,7 +240,7 @@ async def _save_chat_log(
         logger.info(
             f"会话日志已保存: session={session_id}, "
             f"tokens={collector.total_tokens}, "
-            f"models={[d['model'] for d in collector.call_details]}"  # 日志里也打出来
+            f"models={[d['model'] for d in collector.call_details]}"
         )
     except Exception as e:
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
@@ -167,10 +248,9 @@ async def _save_chat_log(
 def _build_session_file_refs(session_service: SessionService, session_id: str, app_id: str) -> list[dict[str, Any]]:
     files = session_service.get_session_files_content(session_id, app_id=app_id) or []
     result: list[dict[str, Any]] = []
-
     for f in files:
         result.append({
-            "file_id": f.get("file_id") or "",      # 优先用 file_id 字段
+            "file_id": f.get("file_id") or "",
             "file_name": f.get("file_name") or "",
             "main_info": f.get("main_info") or {},
         })
@@ -192,7 +272,6 @@ def _print_request_token_summary(
     )
     if collector.last_error:
         logger.info(f"[TOKEN][REQ][LAST_ERROR] {collector.last_error}")
-
 
 
 # ============================================================
@@ -244,40 +323,44 @@ async def chat(req: ChatRequest) -> ChatResponse:
         },
     ):
         for node_name, node_value in output.items():
-            event: dict[str, Any] = {"node": node_name}
+            # ---- 节点级元信息 ----
+            base_meta: dict[str, Any] = {}
             if isinstance(node_value, dict):
-              # Supervisor 返回 role + 即将路由的 sub_agent
-              if node_name == "Supervisor":
-                  role_name = node_value.get("role_name")
-                  if role_name:
-                      event["role"] = role_name
-                  if node_value.get("current_agent"):
-                      event["sub_agent"] = node_value["current_agent"]
+                if node_name == "Supervisor":
+                    role_name = node_value.get("role_name")
+                    if role_name:
+                        base_meta["role"] = role_name
+                    if node_value.get("current_agent"):
+                        base_meta["sub_agent"] = node_value["current_agent"]
 
-              # Generic 执行节点返回当前 sub_agent
-              if node_name in ("GenericAgentRunner", "GenericToolRunner"):
-                  if node_value.get("current_agent"):
-                      event["sub_agent"] = node_value["current_agent"]
-            if node_name == "Supervisor" and isinstance(node_value, dict):
-                role_name = node_value.get("role_name")
-                if role_name:
-                    event["role"] = role_name
-            node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
-            if node_messages:
-                last = node_messages[-1]
-                content = getattr(last, "content", "")
-                event["message"] = content
-                if isinstance(content, str) and content.strip():
-                    final_message = content
-            events.append(event)
+                if node_name in ("GenericAgentRunner", "GenericToolRunner"):
+                    if node_value.get("current_agent"):
+                        base_meta["sub_agent"] = node_value["current_agent"]
+
+            # ---- 逐条消息生成事件 ----
+            msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
+
+            if msg_events:
+                for me in msg_events:
+                    me.update(base_meta)  # 合入 role / sub_agent
+                    events.append(me)
+                    # 只有 assistant 类型的消息才算最终回复
+                    if me.get("message_type") == "assistant":
+                        content = me.get("message", "")
+                        if isinstance(content, str) and content.strip():
+                            final_message = content
+            else:
+                # 无消息的节点（如 Supervisor 只做路由）
+                event = {"node": node_name, **base_meta}
+                events.append(event)
+
     _print_request_token_summary(
-      endpoint="/chat",
-      session_id=req.session_id,
-      app_id=app_id,
-      scene_id=req.scene_id or "default",
-      collector=collector,
-    ) 
-
+        endpoint="/chat",
+        session_id=req.session_id,
+        app_id=app_id,
+        scene_id=req.scene_id or "default",
+        collector=collector,
+    )
 
     asyncio.create_task(_save_chat_log(
         app_id=app_id,
@@ -346,33 +429,36 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             },
         ):
             for node_name, node_value in output.items():
-                payload: dict[str, Any] = {"node": node_name}
+                # ---- 节点级元信息 ----
+                base_meta: dict[str, Any] = {}
                 if isinstance(node_value, dict):
-                  # Supervisor 返回 role + 即将路由的 sub_agent
-                  if node_name == "Supervisor":
-                      role_name = node_value.get("role_name")
-                      if role_name:
-                          payload["role"] = role_name
-                      if node_value.get("current_agent"):
-                          payload["sub_agent"] = node_value["current_agent"]
+                    if node_name == "Supervisor":
+                        role_name = node_value.get("role_name")
+                        if role_name:
+                            base_meta["role"] = role_name
+                        if node_value.get("current_agent"):
+                            base_meta["sub_agent"] = node_value["current_agent"]
 
-                  # Generic 执行节点返回当前 sub_agent
-                  if node_name in ("GenericAgentRunner", "GenericToolRunner"):
-                      if node_value.get("current_agent"):
-                          payload["sub_agent"] = node_value["current_agent"]
-                if node_name == "Supervisor" and isinstance(node_value, dict):
-                    role_name = node_value.get("role_name")
-                    if role_name:
-                        payload["role"] = role_name
-                node_messages = node_value.get("messages") if isinstance(node_value, dict) else None
-                if node_messages:
-                    last = node_messages[-1]
-                    content = getattr(last, "content", "")
-                    payload["message"] = content
-                    if isinstance(content, str) and content.strip():
-                        final_message = content
-                yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        
+                    if node_name in ("GenericAgentRunner", "GenericToolRunner"):
+                        if node_value.get("current_agent"):
+                            base_meta["sub_agent"] = node_value["current_agent"]
+
+                # ---- 逐条消息生成事件 ----
+                msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
+
+                if msg_events:
+                    for me in msg_events:
+                        me.update(base_meta)
+                        # 只有 assistant 类型才更新 final_message
+                        if me.get("message_type") == "assistant":
+                            content = me.get("message", "")
+                            if isinstance(content, str) and content.strip():
+                                final_message = content
+                        yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+                else:
+                    payload = {"node": node_name, **base_meta}
+                    yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
         _print_request_token_summary(
             endpoint="/chat/stream",
             session_id=req.session_id,
@@ -381,7 +467,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             collector=collector,
         )
 
-        # 流结束后写日志
         asyncio.create_task(_save_chat_log(
             app_id=app_id,
             scene_id=req.scene_id,
