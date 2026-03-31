@@ -73,6 +73,10 @@ class WhitelistItemRequest(BaseModel):
     origin: str = Field(..., min_length=1, description="单个白名单源（例如 http://localhost:3000）")
 
 
+class ElementExtractionModelConfigRequest(BaseModel):
+    model_id: str = Field(..., min_length=1, description="模型分级ID（与 sub_agents.model_id 一致）")
+
+
 
 # ============================================================
 # Token & 耗时 收集器

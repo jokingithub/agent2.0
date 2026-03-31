@@ -4,11 +4,17 @@
 
 import json
 import re
-from app.core.llm import get_model
-from dataBase.ConfigService import FileProcessingService
+from app.core.llm import get_model_by_level_id
+from dataBase.ConfigService import (
+    FileProcessingService,
+    ElementExtractionModelConfigService,
+    ModelLevelService,
+)
 from logger import logger
 
 _fp_service = FileProcessingService()
+_ee_model_cfg_service = ElementExtractionModelConfigService()
+_model_level_service = ModelLevelService()
 
 _DEFAULT_PROMPT_TEMPLATE = """# Role
 你是一个专业的数据抽取专家，擅长从各类文档中精确提取关键信息。
@@ -69,6 +75,25 @@ def _find_config(file_type: str) -> dict | None:
     return None
 
 
+def _get_element_extraction_model():
+    """读取要素抽取模型配置，仅支持 model_id。"""
+    cfg = _ee_model_cfg_service.get_current() or {}
+
+    model_id = (cfg.get("model_id") or cfg.get("model_level_id") or "").strip()
+
+    if not model_id:
+        logger.error("要素抽取未配置 model_id，已跳过抽取")
+        return None
+
+    level = _model_level_service.get_by_id(model_id)
+    if not level:
+        logger.error(f"要素抽取配置的 model_id 无效: {model_id}，已跳过抽取")
+        return None
+
+    logger.info(f"要素抽取使用模型(model_id): {model_id}")
+    return get_model_by_level_id(model_id)
+
+
 def element_extraction(file_content: str, file_type: str) -> dict:
     """
     根据 file_processing 配置表抽取要素。
@@ -97,7 +122,10 @@ def element_extraction(file_content: str, file_type: str) -> dict:
         system_prompt = _DEFAULT_PROMPT_TEMPLATE.format(fields_desc=fields_desc)
 
     # 3. 调用 LLM
-    model = get_model("high")
+    model = _get_element_extraction_model()
+    if model is None:
+        logger.error("要素抽取模型不可用，跳过抽取")
+        return {}
     messages = [
         ("system", system_prompt),
         ("user", f"请从以下文本中提取要素：\n\n{file_content}")

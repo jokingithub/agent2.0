@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from .database import Database
 from .CRUD import CRUD
@@ -327,6 +327,33 @@ class FileProcessingService(BaseConfigService):
 
     def get_by_file_type(self, file_type: str) -> Optional[Dict]:
         return self.crud.find_one(self.collection, {"file_type": file_type})
+
+
+class ElementExtractionModelConfigService(BaseConfigService):
+    """要素抽取模型配置（单例，存于 config 表）"""
+
+    collection = "config"
+    model_class = None
+    DOC_ID = "element_extraction_model"
+
+    def get_current(self) -> Optional[Dict[str, Any]]:
+        return self.crud.find_one(self.collection, {"_id": self.DOC_ID})
+
+    def save(self, model_id: str) -> str:
+        current = self.get_current()
+        now = datetime.now().isoformat()
+
+        payload: Dict[str, Any] = {
+            "model_id": model_id,
+            "updated_at": now,
+        }
+
+        if current:
+            self.crud.update_document(self.collection, {"_id": self.DOC_ID}, payload)
+            return self.DOC_ID
+
+        payload.update({"_id": self.DOC_ID, "created_at": now})
+        return self.crud.insert_document(self.collection, payload)
 
 
 class SceneService(BaseConfigService):

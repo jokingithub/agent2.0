@@ -11,11 +11,72 @@ from datetime import datetime
 
 from dataBase.Schema import FileModel
 from dataBase.Service import FileService, SessionService
+from dataBase.ConfigService import FileProcessingService
 
 from fileUpload.file_classfly import classify_file
 from fileUpload.extract_content import extract_content
 from fileUpload.element_extraction import element_extraction
 from logger import logger
+
+
+_fp_service = FileProcessingService()
+
+
+def _is_blank_content(content: Any) -> bool:
+    text = (content or "") if isinstance(content, str) else ""
+    text = text.strip()
+    if not text:
+        return True
+
+    # 这些表示 OCR/提取未产出有效内容
+    empty_markers = [
+        "[OCR 未识别到文字内容]",
+        "读取失败",
+    ]
+    if text in empty_markers:
+        return True
+    if text.startswith("提取内容失败"):
+        return True
+
+    return False
+
+
+def _is_empty_main_info(main_info: Any) -> bool:
+    if main_info is None:
+        return True
+    if not isinstance(main_info, dict):
+        return False
+    if not main_info:
+        return True
+
+    # 字典存在但值全空，也视为空（用于后续重试抽取）
+    for v in main_info.values():
+        if v not in (None, "", [], {}, ()):
+            return False
+    return True
+
+
+def _need_reprocess_cached(hit: dict) -> bool:
+    return _is_blank_content(hit.get("content")) or _is_empty_main_info(hit.get("main_info"))
+
+
+def _find_fields_for_type(file_type: str) -> list[str]:
+    cfg = _fp_service.get_by_file_type(file_type)
+    if cfg and isinstance(cfg.get("fields"), list):
+        return [x for x in cfg.get("fields", []) if isinstance(x, str) and x.strip()]
+
+    all_cfg = _fp_service.get_all()
+    for item in all_cfg:
+        ft = item.get("file_type", "")
+        if isinstance(ft, str) and (ft in file_type or file_type in ft):
+            fields = item.get("fields") or []
+            return [x for x in fields if isinstance(x, str) and x.strip()]
+    return []
+
+
+def _empty_element_payload(file_type: str) -> dict[str, Any]:
+    fields = _find_fields_for_type(file_type)
+    return {k: None for k in fields}
 
 
 def _safe_filename(name: str) -> str:
@@ -68,32 +129,43 @@ async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
         await file.seek(0)
 
         # 去重（同 file_id + app_id）
-        if hits := file_service.get_file_info(file_id, app_id=app_id):
-            file_info = FileModel(**hits)
+        cached_hit = file_service.get_file_info(file_id, app_id=app_id)
+        if cached_hit and not _need_reprocess_cached(cached_hit):
+            file_info = FileModel(**cached_hit)
             session_service.add_file_to_session(session_id, file_info=file_info, app_id=app_id)
             return {
                 "session_id": session_id,
                 "app_id": app_id,
-                "file_name": hits["file_name"],
-                "file_id": hits["file_id"],
-                "file_type": hits["file_type"],
-                "content_preview": hits["content"][:500] + ("..." if len(hits["content"]) > 500 else ""),
+                "file_name": cached_hit["file_name"],
+                "file_id": cached_hit["file_id"],
+                "file_type": cached_hit["file_type"],
+                "content_preview": cached_hit["content"][:500] + ("..." if len(cached_hit["content"]) > 500 else ""),
                 "message": "文件已存在，返回已有信息",
             }
 
+        # 命中缓存但内容/要素为空：触发重处理
+        if cached_hit and _need_reprocess_cached(cached_hit):
+            logger.warning(
+                "命中缓存但内容或要素为空，触发重处理: file_id=%s app_id=%s",
+                file_id,
+                app_id,
+            )
+
         # 新文件：先创建一条“处理中”记录，便于前端轮询处理状态
-        initial_doc = FileModel(
-            app_id=app_id,
-            file_id=file_id,
-            file_name=file.filename,
-            file_type=[],
-            content="",
-            processing_status="processing",
-            processing_stage="received",
-            processing_message="文件已接收，等待处理",
-            upload_time=datetime.now(),
-        )
-        file_service.save_file_info(initial_doc)
+        if not cached_hit:
+            initial_doc = FileModel(
+                app_id=app_id,
+                file_id=file_id,
+                file_name=file.filename,
+                file_type=[],
+                content="",
+                main_info=None,
+                processing_status="processing",
+                processing_stage="received",
+                processing_message="文件已接收，等待处理",
+                upload_time=datetime.now(),
+            )
+            file_service.save_file_info(initial_doc)
 
 
         # 写文件（tmp 或持久目录）
@@ -139,6 +211,11 @@ async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
             result = element_extraction(file_content=extracted_content, file_type=ft)
             if result and not result.get("_error") and not result.get("_parse_error"):
                 element.update(result)
+            else:
+                # 抽取失败时，将该类型对应字段置空，方便后续重试识别
+                empty_payload = _empty_element_payload(ft)
+                for k, v in empty_payload.items():
+                    element.setdefault(k, v)
         logger.info(f"要素抽取结果: {element}")
 
         file_data = FileModel(
@@ -182,7 +259,7 @@ async def save_file(file, session_id, app_id: str = "") -> dict[str, Any]:
             "file_id": file_id,
             "file_type": file_type,
             "content_preview": preview,
-            "message": "文件上传和提取成功",
+            "message": "文件上传和提取成功" if not cached_hit else "命中缓存但内容为空，已重新执行OCR与要素抽取",
         }
 
     except Exception as e:
