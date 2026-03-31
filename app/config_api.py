@@ -11,7 +11,7 @@ from dataBase.ConfigService import (
     GatewayEnvService, GatewayAppService, GatewayChannelService,
     ToolService, ChatLogService,
     RoleService, SubAgentService, SkillService,
-    FileProcessingService, SceneService,
+    FileProcessingService, SceneService, ElementExtractionModelConfigService,
 )
 from dataBase.Schema import (
     ModelConnectionModel, ModelLevelModel,
@@ -25,6 +25,7 @@ from app.Schema import (
     MCPToolSyncRequest,
     WhitelistReplaceRequest,
     WhitelistItemRequest,
+    ElementExtractionModelConfigRequest,
 )
 from logger import logger
 from pathlib import Path as FilePath
@@ -736,6 +737,32 @@ def agent_remove_tool(agent_id: str, tool_id: str):
 
 # --- 关联管理：技能 ↔ 工具 ---
 _skill_service = SkillService()
+
+
+# --- 要素抽取模型配置（单例） ---
+_element_extraction_model_config_service = ElementExtractionModelConfigService()
+
+
+@router.get("/element-extraction-model", summary="获取要素抽取模型配置")
+def get_element_extraction_model_config():
+    current = _element_extraction_model_config_service.get_current() or {}
+    model_id = current.get("model_id") or current.get("model_level_id") or None
+    return {
+        "model_id": model_id,
+        "updated_at": current.get("updated_at"),
+    }
+
+
+@router.put("/element-extraction-model", summary="更新要素抽取模型配置")
+def update_element_extraction_model_config(data: ElementExtractionModelConfigRequest):
+    doc_id = _element_extraction_model_config_service.save(
+        model_id=data.model_id,
+    )
+    return {
+        "id": doc_id,
+        "model_id": data.model_id,
+        "message": "要素抽取模型配置更新成功",
+    }
 
 @router.post("/skills/{skill_id}/tools/{tool_id}", summary="技能添加工具")
 def skill_add_tool(skill_id: str, tool_id: str):

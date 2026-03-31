@@ -7,7 +7,7 @@ import asyncio
 from typing import Any, Optional
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -95,6 +95,88 @@ async def upload_file(
             content_preview="",
             message=f"文件处理失败: {str(e)}"
         )
+
+
+class MCPDebugListRequest(BaseModel):
+    url: str = Field(default="http://127.0.0.1:9001/sse", description="MCP SSE 地址")
+    timeout_seconds: int = Field(default=20, ge=1, le=120, description="超时时间（秒）")
+
+
+class MCPDebugCallRequest(BaseModel):
+    url: str = Field(default="http://127.0.0.1:9001/sse", description="MCP SSE 地址")
+    tool_name: str = Field(..., min_length=1, description="工具名")
+    args: dict[str, Any] = Field(default_factory=dict, description="工具参数")
+    timeout_seconds: int = Field(default=30, ge=1, le=120, description="超时时间（秒）")
+
+
+def _extract_mcp_result_text(result: Any) -> str:
+    """尽量提取 MCP 返回中的文本内容。"""
+    try:
+        content = getattr(result, "content", None)
+        if isinstance(content, list):
+            texts: list[str] = []
+            for c in content:
+                text = getattr(c, "text", None)
+                if text is not None:
+                    texts.append(str(text))
+                else:
+                    texts.append(str(c))
+            return "\n".join(texts)
+    except Exception:
+        pass
+    return str(result)
+
+
+@app.post("/mcp/debug/list", summary="调试：列出 MCP 工具")
+async def mcp_debug_list(req: MCPDebugListRequest):
+    try:
+        from fastmcp import Client
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"fastmcp 不可用: {e}")
+
+    try:
+        client_ctx = Client.from_url(req.url) if hasattr(Client, "from_url") else Client(req.url)
+        async with client_ctx as client:
+            tools = await asyncio.wait_for(client.list_tools(), timeout=req.timeout_seconds)
+            items = []
+            for t in tools or []:
+                items.append({
+                    "name": getattr(t, "name", ""),
+                    "description": getattr(t, "description", ""),
+                })
+            return {"ok": True, "url": req.url, "tools": items, "count": len(items)}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="连接 MCP 超时")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"列工具失败: {e}")
+
+
+@app.post("/mcp/debug/call", summary="调试：调用 MCP 工具")
+async def mcp_debug_call(req: MCPDebugCallRequest):
+    try:
+        from fastmcp import Client
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"fastmcp 不可用: {e}")
+
+    try:
+        client_ctx = Client.from_url(req.url) if hasattr(Client, "from_url") else Client(req.url)
+        async with client_ctx as client:
+            result = await asyncio.wait_for(
+                client.call_tool(req.tool_name, req.args or {}),
+                timeout=req.timeout_seconds,
+            )
+            return {
+                "ok": True,
+                "url": req.url,
+                "tool_name": req.tool_name,
+                "args": req.args,
+                "result_text": _extract_mcp_result_text(result),
+                "result_raw": str(result),
+            }
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="调用 MCP 工具超时")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"调用失败: {e}")
 
 
 # ============================================================
