@@ -49,14 +49,6 @@ class FileService:
         query = self._file_query(file_id, app_id)
         return self.crud.delete_document(self.collection, query)
 
-
-    def update_file_info(self, file_id: str, update_data: FileModel) -> int:
-        data = update_data.model_dump(exclude_none=True, exclude={'id', 'file_id'})
-        return self.crud.update_document(self.collection, {"_id": file_id}, data)
-
-    def delete_file_info(self, file_id: str) -> int:
-        return self.crud.delete_document(self.collection, {"_id": file_id})
-
     def update_processing_status(
         self,
         file_id: str,
@@ -66,7 +58,8 @@ class FileService:
         processing_message: str = "",
         extra_fields: Optional[Dict[str, Any]] = None,
     ) -> int:
-        query: Dict[str, Any] = {"_id": file_id}
+        # 改这里：不要再用 _id=file_id
+        query: Dict[str, Any] = {"file_id": file_id}
         if app_id:
             query["app_id"] = app_id
 
