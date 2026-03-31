@@ -14,6 +14,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="用户输入")
     app_id: str = Field(..., min_length=1, description="应用 ID（必填）")
     scene_id: str = Field(default="default", description="场景 ID")
+    role_id: str = Field(default="", description="指定角色 ID（可选，不传则用场景默认第一个）")
     recursion_limit: int = Field(50, ge=1, le=200)
 
 

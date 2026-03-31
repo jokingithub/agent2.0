@@ -696,6 +696,27 @@ def get_scene_by_code(scene_code: str):
         raise HTTPException(status_code=404, detail="场景不存在")
     return result
 
+@router.get("/scenes/{scene_code}/roles", summary="按场景码查关联角色列表")
+def get_roles_by_scene(scene_code: str):
+    """根据 scene_code 查询关联的 role 列表（供前端 role 选择器使用）"""
+    scene = _scene_service.get_by_code(scene_code)
+    if not scene:
+        return []
+
+    role_ids = scene.get("available_role_ids", []) or []
+    roles = []
+    for rid in role_ids:
+        try:
+            r = _role_service.get_by_id(rid)
+            if r:
+                roles.append({
+                    "id": r.get("_id", rid),
+                    "name": r.get("name", ""),
+                    "description": r.get("description") or r.get("system_prompt", "")[:80],
+                })
+        except Exception:
+            pass
+    return roles
 
 # --- 关联管理：角色 ↔ 子Agent ---
 _role_service = RoleService()

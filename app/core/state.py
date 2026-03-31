@@ -17,6 +17,7 @@ class AgentState(TypedDict):
 
     # 当前生效角色名（给前端展示）
     role_name: Optional[str]
+    selected_role_id: Optional[str]  # ← 新增：前端指定的 role
 
     session_id: str
     app_id: str

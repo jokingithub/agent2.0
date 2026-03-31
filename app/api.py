@@ -307,6 +307,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         "session_id": req.session_id,
         "app_id": app_id,
         "scene_id": req.scene_id or "default",
+        "selected_role_id": req.role_id or "",  # ← 新增
         "messages": messages,
         "session_files": session_files,
     }
@@ -413,6 +414,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         "session_id": req.session_id,
         "app_id": app_id,
         "scene_id": req.scene_id or "default",
+        "selected_role_id": req.role_id or "",  # ← 新增
         "messages": messages,
         "session_files": session_files,
     }

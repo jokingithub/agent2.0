@@ -78,10 +78,24 @@ def _load_all_sub_agents_from_db() -> Dict[str, str]:
 
 def supervisor_node(state):
     scene_id = state.get("scene_id", "default")
+    selected_role_id = state.get("selected_role_id", "")  # ← 新增
     messages = state.get("messages", [])
 
-    # 1) 场景角色
-    role = _load_role_by_scene(scene_id)
+    # 1) 优先用前端指定的 role_id
+    role = None
+    if selected_role_id:
+        try:
+            role = _role_service.get_by_id(selected_role_id)
+            if role:
+                logger.info(f"Supervisor: 使用前端指定 role_id={selected_role_id}")
+        except Exception as e:
+            logger.warning(f"加载指定 role 失败 role_id={selected_role_id}, err={e}")
+
+    # 2) 没指定或加载失败，走场景默认
+    if not role:
+        role = _load_role_by_scene(scene_id)
+
+    # 后面逻辑不变 ↓
     if role:
         available_subagents = _load_sub_agents_for_role(role)
         system_prompt = role.get("system_prompt", "")
