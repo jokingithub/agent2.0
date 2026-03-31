@@ -319,12 +319,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
     messages = [(msg["role"], msg["content"]) for msg in history]
     session_files = _build_session_file_refs(session_service, req.session_id, app_id)
-    if session_files:
-        messages.append((
-            "system",
-            "当前会话已挂靠文件信息如下（仅供参考，按需使用）:\n"
-            + json.dumps(session_files, ensure_ascii=False)
-        ))
+    files_json = json.dumps(session_files or [], ensure_ascii=False)
+    messages.append((
+        "system",
+        f"当前会话挂靠文件信息如下（为空数组表示无挂靠）:\n<files>\n{files_json}\n</files>"
+    ))
     messages.append(("user", req.message))
 
     inputs = {
