@@ -58,6 +58,7 @@ def get_model_with_meta(model_choice: str = "high") -> Tuple[ChatOpenAI, Dict[st
         temperature=0,
         api_key=_FALLBACK["api_key"],
         base_url=_FALLBACK["base_url"],
+        streaming=True,
     )
 
     meta = {
@@ -195,6 +196,7 @@ def _build_from_level_with_meta(level: dict) -> Optional[Tuple[ChatOpenAI, Dict[
         api_key=api_key,
         base_url=base_url,
         timeout=timeout,
+        streaming=True,
     )
 
     meta = {

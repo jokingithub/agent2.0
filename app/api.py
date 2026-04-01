@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.callbacks import AsyncCallbackHandler
 
 from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
@@ -272,6 +273,199 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
     return events
 
 
+class StreamTokenCallback(AsyncCallbackHandler):
+    """把 LLM token 写入 asyncio.Queue，供 SSE 实时输出。"""
+
+    def __init__(self, queue: "asyncio.Queue[str]"):
+        super().__init__()
+        self.queue = queue
+        # 仅屏蔽路由节点的结构化输出 token，避免把 next/answer JSON 透传给前端。
+        self._blocked_nodes = {"Supervisor"}
+        self._blocked_run_ids: set[str] = set()
+        self._allowed_run_ids: set[str] = set()
+        self._stream_states: dict[str, dict[str, Any]] = {}
+
+    def _track_run(self, **kwargs):
+        metadata = kwargs.get("metadata", {}) or {}
+        node = metadata.get("langgraph_node", "")
+        run_id = kwargs.get("run_id")
+        if run_id is None:
+            return
+
+        rid = str(run_id)
+        if node in self._blocked_nodes:
+            self._blocked_run_ids.add(rid)
+            self._allowed_run_ids.discard(rid)
+            return
+
+        self._allowed_run_ids.add(rid)
+
+    def _stream_key(self, **kwargs) -> str:
+        run_id = kwargs.get("run_id")
+        return str(run_id) if run_id is not None else "__no_run_id__"
+
+    def _state_for(self, stream_key: str) -> dict[str, Any]:
+        state = self._stream_states.get(stream_key)
+        if state is None:
+            state = {
+                "mode": "unknown",  # unknown | passthrough | structured | done
+                "sniff": "",
+                "phase": "find_key",  # find_key | find_colon | find_quote | in_answer | done
+                "key_window": "",
+                "seen_colon": False,
+                "escape": False,
+            }
+            self._stream_states[stream_key] = state
+        return state
+
+    def _append_answer_char(self, ch: str, state: dict[str, Any], out: list[str]):
+        if state["escape"]:
+            mapping = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "/": "/"}
+            out.append(mapping.get(ch, ch))
+            state["escape"] = False
+            return
+
+        if ch == "\\":
+            state["escape"] = True
+            return
+
+        if ch == '"':
+            state["phase"] = "done"
+            state["mode"] = "done"
+            return
+
+        out.append(ch)
+
+    def _consume_structured_token(self, state: dict[str, Any], token: str) -> str:
+        out: list[str] = []
+
+        for ch in token:
+            phase = state["phase"]
+
+            if phase == "find_key":
+                state["key_window"] = (state["key_window"] + ch)[-40:]
+                if '"answer"' in state["key_window"]:
+                    state["phase"] = "find_colon"
+                continue
+
+            if phase == "find_colon":
+                if ch == ":":
+                    state["seen_colon"] = True
+                    state["phase"] = "find_quote"
+                continue
+
+            if phase == "find_quote":
+                if not state["seen_colon"]:
+                    continue
+                if ch in (" ", "\n", "\r", "\t"):
+                    continue
+                if ch == '"':
+                    state["phase"] = "in_answer"
+                elif ch == "n":
+                    # answer 为 null
+                    state["phase"] = "done"
+                    state["mode"] = "done"
+                continue
+
+            if phase == "in_answer":
+                self._append_answer_char(ch, state, out)
+                continue
+
+            if phase == "done":
+                continue
+
+        return "".join(out)
+
+    def _transform_token(self, token: str, *, force_structured: bool, stream_key: str) -> str:
+        state = self._state_for(stream_key)
+
+        if force_structured:
+            if state["mode"] in ("unknown", "passthrough"):
+                state["mode"] = "structured"
+                state["sniff"] = ""
+            return self._consume_structured_token(state, token)
+
+        mode = state["mode"]
+        if mode == "passthrough":
+            return token
+        if mode in ("structured", "done"):
+            return self._consume_structured_token(state, token)
+
+        # unknown: 先嗅探，识别是否是 Supervisor 的结构化 JSON 流。
+        state["sniff"] += token
+        sniff = state["sniff"]
+        stripped = sniff.lstrip()
+        if not stripped:
+            return ""
+
+        if not stripped.startswith("{"):
+            state["mode"] = "passthrough"
+            state["sniff"] = ""
+            return sniff
+
+        if '"next"' in sniff or '"answer"' in sniff:
+            state["mode"] = "structured"
+            state["sniff"] = ""
+            return self._consume_structured_token(state, sniff)
+
+        # 给结构化输出一点前置缓冲窗口，避免误判。
+        if len(sniff) > 96:
+            state["mode"] = "passthrough"
+            state["sniff"] = ""
+            return sniff
+
+        return ""
+
+    async def on_chat_model_start(self, serialized, messages, **kwargs):
+        self._track_run(**kwargs)
+
+    async def on_llm_start(self, serialized, prompts=None, **kwargs):
+        self._track_run(**kwargs)
+
+    async def on_llm_new_token(self, token: str, **kwargs):
+        if not token:
+            return
+
+        stream_key = self._stream_key(**kwargs)
+
+        run_id = kwargs.get("run_id")
+        if run_id is not None:
+            rid = str(run_id)
+            if rid in self._blocked_run_ids:
+                delta = self._transform_token(token, force_structured=True, stream_key=stream_key)
+                if delta:
+                    await self.queue.put(delta)
+                return
+            if rid in self._allowed_run_ids:
+                await self.queue.put(token)
+                return
+
+        metadata = kwargs.get("metadata", {}) or {}
+        node = metadata.get("langgraph_node", "")
+        if node in self._blocked_nodes:
+            delta = self._transform_token(token, force_structured=True, stream_key=stream_key)
+            if delta:
+                await self.queue.put(delta)
+            return
+
+        delta = self._transform_token(token, force_structured=False, stream_key=stream_key)
+        if delta:
+            await self.queue.put(delta)
+
+    def _cleanup_run(self, **kwargs):
+        run_id = kwargs.get("run_id")
+        rid = str(run_id) if run_id is not None else "__no_run_id__"
+        self._blocked_run_ids.discard(rid)
+        self._allowed_run_ids.discard(rid)
+        self._stream_states.pop(rid, None)
+
+    async def on_llm_end(self, response, **kwargs):
+        self._cleanup_run(**kwargs)
+
+    async def on_llm_error(self, error, **kwargs):
+        self._cleanup_run(**kwargs)
+
+
 # ============================================================
 # 日志写入
 # ============================================================
@@ -495,7 +689,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     app_id = req.app_id or ""
 
     collector = UsageCollector()
-    callbacks = [collector]
+    token_queue: asyncio.Queue[str] = asyncio.Queue()
+    token_cb = StreamTokenCallback(token_queue)
+    callbacks = [collector, token_cb]
 
     session_service = SessionService()
     session_service.ensure_session(req.session_id, app_id=app_id)
@@ -525,60 +721,110 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def event_gen():
         final_message = ""
 
-        async for output in graph.astream(
-            inputs,
-            config={
-                "recursion_limit": req.recursion_limit,
-                "configurable": {"thread_id": req.session_id},
-                "callbacks": callbacks,
-            },
-        ):
-            for node_name, node_value in output.items():
-                # ---- 节点级元信息 ----
-                base_meta: dict[str, Any] = {}
-                if isinstance(node_value, dict):
-                    if node_name == "Supervisor":
-                        role_name = node_value.get("role_name")
-                        if role_name:
-                            base_meta["role"] = role_name
-                        if node_value.get("current_agent"):
-                            base_meta["sub_agent"] = node_value["current_agent"]
+        async def run_graph():
+            nonlocal final_message
+            async for output in graph.astream(
+                inputs,
+                config={
+                    "recursion_limit": req.recursion_limit,
+                    "configurable": {"thread_id": req.session_id},
+                    "callbacks": callbacks,
+                },
+            ):
+                for node_name, node_value in output.items():
+                    # ---- 节点级元信息 ----
+                    base_meta: dict[str, Any] = {}
+                    if isinstance(node_value, dict):
+                        if node_name == "Supervisor":
+                            role_name = node_value.get("role_name")
+                            if role_name:
+                                base_meta["role"] = role_name
+                            if node_value.get("current_agent"):
+                                base_meta["sub_agent"] = node_value["current_agent"]
 
-                    if node_name in ("GenericAgentRunner", "GenericToolRunner"):
-                        if node_value.get("current_agent"):
-                            base_meta["sub_agent"] = node_value["current_agent"]
+                        if node_name in ("GenericAgentRunner", "GenericToolRunner"):
+                            if node_value.get("current_agent"):
+                                base_meta["sub_agent"] = node_value["current_agent"]
 
-                # ---- 逐条消息生成事件 ----
-                msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
+                    # ---- 逐条消息生成事件 ----
+                    msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
 
-                if msg_events:
-                    for me in msg_events:
-                        me.update(base_meta)
-                        # 只有 assistant 类型才更新 final_message
-                        if me.get("message_type") == "assistant":
-                            content = me.get("message", "")
-                            if isinstance(content, str) and content.strip():
-                                final_message = content
-                        yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+                    if msg_events:
+                        for me in msg_events:
+                            me.update(base_meta)
+                            # 只有 assistant 类型才更新 final_message
+                            if me.get("message_type") == "assistant":
+                                content = me.get("message", "")
+                                if isinstance(content, str) and content.strip():
+                                    final_message = content
+                            yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
 
-                    # HITL 挂起事件
-                    if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
-                        pending = node_value.get("pending_context") or {}
-                        suspend_payload = {
-                            "node": node_name,
-                            "message_type": "suspend",
-                            "message": "需要用户输入，流程已挂起",
-                            "interaction_id": pending.get("interaction_id", ""),
-                            "question": pending.get("question", ""),
-                            "input_type": pending.get("input_type", "text"),
-                            "expected_input": pending.get("expected_input") or [],
-                            "expected_schema": pending.get("expected_schema") or {},
-                            "timeout_seconds": pending.get("timeout_seconds", 300),
-                        }
-                        yield f"event: node\ndata: {json.dumps(suspend_payload, ensure_ascii=False)}\n\n"
+                        # HITL 挂起事件
+                        if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
+                            pending = node_value.get("pending_context") or {}
+                            suspend_payload = {
+                                "node": node_name,
+                                "message_type": "suspend",
+                                "message": "需要用户输入，流程已挂起",
+                                "interaction_id": pending.get("interaction_id", ""),
+                                "question": pending.get("question", ""),
+                                "input_type": pending.get("input_type", "text"),
+                                "expected_input": pending.get("expected_input") or [],
+                                "expected_schema": pending.get("expected_schema") or {},
+                                "timeout_seconds": pending.get("timeout_seconds", 300),
+                            }
+                            yield f"event: node\ndata: {json.dumps(suspend_payload, ensure_ascii=False)}\n\n"
+                    else:
+                        payload = {"node": node_name, **base_meta}
+                        yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        done = False
+        graph_iter = run_graph().__aiter__()
+        graph_next_task = asyncio.create_task(graph_iter.__anext__())
+        token_task = asyncio.create_task(token_queue.get())
+
+        while True:
+            wait_set = {t for t in (graph_next_task, token_task) if t is not None}
+            if not wait_set:
+                break
+
+            finished, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+
+            if token_task in finished:
+                token = token_task.result()
+                token_payload = {
+                    "message_type": "token",
+                    "delta": token,
+                }
+                yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
+                if not done:
+                    token_task = asyncio.create_task(token_queue.get())
                 else:
-                    payload = {"node": node_name, **base_meta}
-                    yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    token_task = None
+
+            if graph_next_task in finished:
+                try:
+                    node_chunk = graph_next_task.result()
+                    yield node_chunk
+                    graph_next_task = asyncio.create_task(graph_iter.__anext__())
+                except StopAsyncIteration:
+                    done = True
+                    graph_next_task = None
+                    # 给队列一个轮询窗口，尽量把尾部 token 发完
+                    while True:
+                        try:
+                            token = await asyncio.wait_for(token_queue.get(), timeout=0.05)
+                        except asyncio.TimeoutError:
+                            break
+                        token_payload = {
+                            "message_type": "token",
+                            "delta": token,
+                        }
+                        yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
+                    if token_task is not None:
+                        token_task.cancel()
+                        token_task = None
+                    break
 
         _print_request_token_summary(
             endpoint="/chat/stream",

@@ -84,7 +84,7 @@ def route_after_generic_agent(state: AgentState) -> str:
     return "DONE"
 
 
-def generic_agent_runner(state: AgentState, config: RunnableConfig = None):
+async def generic_agent_runner(state: AgentState, config: RunnableConfig = None):
     current_agent = (state.get("current_agent") or "").strip()
     if not current_agent:
         nxt = (state.get("next") or "").strip()
@@ -126,7 +126,7 @@ def generic_agent_runner(state: AgentState, config: RunnableConfig = None):
         )
         messages.insert(0, SystemMessage(content=f"当前会话关联的文件:\n{file_list}"))
 
-    response = agent.invoke({"messages": messages}, config=config)
+    response = await agent.ainvoke({"messages": messages}, config=config)
     return {"messages": [response], "current_agent": current_agent}
 
 
