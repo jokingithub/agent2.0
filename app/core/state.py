@@ -26,3 +26,8 @@ class AgentState(TypedDict):
     role_config: Optional[Dict[str, Any]]
     available_sub_agents: Optional[List[str]]
     session_files: Optional[List[Dict[str, Any]]]
+
+    # HITL 挂起信息
+    user_input_required: Optional[bool]
+    suspended_action: Optional[str]
+    pending_context: Optional[Dict[str, Any]]

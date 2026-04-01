@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from app.graph.builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
+from app.Schema import ResumeHITLRequest
 from fileUpload.fileUpload import save_file
 from logger import logger
 from config import Config
@@ -432,6 +433,22 @@ async def chat(req: ChatRequest) -> ChatResponse:
                         content = me.get("message", "")
                         if isinstance(content, str) and content.strip():
                             final_message = content
+
+                # HITL: tool runner 标记需要用户输入时，输出挂起事件
+                if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
+                    pending = node_value.get("pending_context") or {}
+                    suspend_event = {
+                        "node": node_name,
+                        "message_type": "suspend",
+                        "message": "需要用户输入，流程已挂起",
+                        "interaction_id": pending.get("interaction_id", ""),
+                        "question": pending.get("question", ""),
+                        "input_type": pending.get("input_type", "text"),
+                        "expected_input": pending.get("expected_input") or [],
+                        "expected_schema": pending.get("expected_schema") or {},
+                        "timeout_seconds": pending.get("timeout_seconds", 300),
+                    }
+                    events.append(suspend_event)
             else:
                 # 无消息的节点（如 Supervisor 只做路由）
                 event = {"node": node_name, **base_meta}
@@ -539,6 +556,22 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             if isinstance(content, str) and content.strip():
                                 final_message = content
                         yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+
+                    # HITL 挂起事件
+                    if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
+                        pending = node_value.get("pending_context") or {}
+                        suspend_payload = {
+                            "node": node_name,
+                            "message_type": "suspend",
+                            "message": "需要用户输入，流程已挂起",
+                            "interaction_id": pending.get("interaction_id", ""),
+                            "question": pending.get("question", ""),
+                            "input_type": pending.get("input_type", "text"),
+                            "expected_input": pending.get("expected_input") or [],
+                            "expected_schema": pending.get("expected_schema") or {},
+                            "timeout_seconds": pending.get("timeout_seconds", 300),
+                        }
+                        yield f"event: node\ndata: {json.dumps(suspend_payload, ensure_ascii=False)}\n\n"
                 else:
                     payload = {"node": node_name, **base_meta}
                     yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -570,3 +603,161 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+@app.get("/sessions/{session_id}/hitl/status")
+async def get_hitl_status(session_id: str, app_id: str):
+    svc = SessionService()
+    pending = svc.get_pending_interaction(session_id, app_id=app_id)
+    if not pending:
+        meta = svc.get_session_metadata(session_id, app_id=app_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+        return {
+            "session_id": session_id,
+            "app_id": app_id,
+            "pending_status": meta.get("pending_status", "active"),
+            "pending_data": meta.get("pending_data") or {},
+            "pending_expires_at": meta.get("pending_expires_at"),
+        }
+
+    return {
+        "session_id": session_id,
+        "app_id": app_id,
+        "pending_status": pending.get("pending_status", "suspended"),
+        "pending_data": pending.get("pending_data") or {},
+        "pending_expires_at": pending.get("pending_expires_at"),
+    }
+
+
+@app.post("/sessions/{session_id}/hitl/resume")
+async def resume_hitl(session_id: str, req: ResumeHITLRequest):
+    svc = SessionService()
+    request_time = datetime.now(timezone.utc)
+    collector = UsageCollector()
+    callbacks = [collector]
+
+    result = svc.resume_pending_interaction(
+        session_id=session_id,
+        app_id=req.app_id,
+        interaction_id=req.interaction_id,
+        user_input=req.user_input,
+    )
+    if not result.get("ok"):
+        code = result.get("code") or "RESUME_FAILED"
+        status_code = 400
+        if code == "SESSION_NOT_FOUND":
+            status_code = 404
+        elif code == "PENDING_TIMEOUT":
+            status_code = 409
+        elif code == "NO_PENDING":
+            status_code = 409
+        elif code == "INTERACTION_MISMATCH":
+            status_code = 409
+        raise HTTPException(status_code=status_code, detail=result.get("message", "恢复失败"))
+
+    # 恢复后自动继续执行 graph
+    resume_inputs = svc.build_resume_graph_inputs(session_id=session_id, app_id=req.app_id)
+    if not resume_inputs:
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "app_id": req.app_id,
+            "code": result.get("code"),
+            "message": result.get("message"),
+            "pending_data": result.get("pending_data") or {},
+            "continued": False,
+            "final_message": "",
+            "events": [],
+        }
+
+    events: list[dict[str, Any]] = []
+    final_message = ""
+    async for output in graph.astream(
+        resume_inputs,
+        config={
+            "recursion_limit": req.recursion_limit,
+            "configurable": {"thread_id": session_id},
+            "callbacks": callbacks,
+        },
+    ):
+        for node_name, node_value in output.items():
+            base_meta: dict[str, Any] = {}
+            if isinstance(node_value, dict):
+                if node_name == "Supervisor":
+                    role_name = node_value.get("role_name")
+                    if role_name:
+                        base_meta["role"] = role_name
+                    if node_value.get("current_agent"):
+                        base_meta["sub_agent"] = node_value["current_agent"]
+
+                if node_name in ("GenericAgentRunner", "GenericToolRunner"):
+                    if node_value.get("current_agent"):
+                        base_meta["sub_agent"] = node_value["current_agent"]
+
+            msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
+
+            if msg_events:
+                for me in msg_events:
+                    me.update(base_meta)
+                    events.append(me)
+                    if me.get("message_type") == "assistant":
+                        content = me.get("message", "")
+                        if isinstance(content, str) and content.strip():
+                            final_message = content
+
+                if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
+                    pending = node_value.get("pending_context") or {}
+                    suspend_event = {
+                        "node": node_name,
+                        "message_type": "suspend",
+                        "message": "需要用户输入，流程已挂起",
+                        "interaction_id": pending.get("interaction_id", ""),
+                        "question": pending.get("question", ""),
+                        "input_type": pending.get("input_type", "text"),
+                        "expected_input": pending.get("expected_input") or [],
+                        "expected_schema": pending.get("expected_schema") or {},
+                        "timeout_seconds": pending.get("timeout_seconds", 300),
+                    }
+                    events.append(suspend_event)
+            else:
+                events.append({"node": node_name, **base_meta})
+
+    # 记录恢复后的对话日志
+    resumed_input = req.user_input
+    if isinstance(resumed_input, (dict, list)):
+        resumed_input_text = json.dumps(resumed_input, ensure_ascii=False)
+    else:
+        resumed_input_text = str(resumed_input)
+
+    _print_request_token_summary(
+        endpoint="/sessions/{session_id}/hitl/resume",
+        session_id=session_id,
+        app_id=req.app_id,
+        scene_id="default",
+        collector=collector,
+    )
+
+    asyncio.create_task(_save_chat_log(
+        app_id=req.app_id,
+        scene_id="default",
+        session_id=session_id,
+        request_content=f"[HITL_RESUME] {resumed_input_text}",
+        response_content=final_message,
+        request_time=request_time,
+        collector=collector,
+    ))
+
+    svc.touch_session(session_id, app_id=req.app_id)
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "app_id": req.app_id,
+        "code": result.get("code"),
+        "message": result.get("message"),
+        "pending_data": result.get("pending_data") or {},
+        "continued": True,
+        "final_message": final_message,
+        "events": events,
+    }

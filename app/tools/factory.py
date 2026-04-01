@@ -103,10 +103,47 @@ async def _call_remote_mcp(url: str, tool_name: str, kwargs: dict) -> str:
 
         async with client_ctx as client:
             result = await client.call_tool(tool_name, kwargs)
-            
-            # 提取文本内容
+
+            # 提取文本内容（兼容 TextContent / dict / 其他对象）
             if hasattr(result, "content") and isinstance(result.content, list):
-                return "\n".join([str(c.text) for c in result.content if hasattr(c, "text")])
+                parts: list[str] = []
+                for c in result.content:
+                    text_value = None
+
+                    # 1) 典型对象：c.text
+                    if hasattr(c, "text"):
+                        text_value = getattr(c, "text", None)
+
+                    # 2) dict 结构：{"text": "..."}
+                    if text_value is None and isinstance(c, dict):
+                        text_value = c.get("text")
+
+                    # 3) 支持 pydantic/dataclass 风格对象
+                    if text_value is None and hasattr(c, "model_dump"):
+                        try:
+                            dumped = c.model_dump()
+                            if isinstance(dumped, dict):
+                                text_value = dumped.get("text")
+                        except Exception:
+                            pass
+
+                    # 有 text 则优先使用
+                    if text_value is not None:
+                        parts.append(str(text_value))
+                        continue
+
+                    # 无 text 时不丢弃，保留结构化内容避免“空返回”
+                    if isinstance(c, dict):
+                        parts.append(json.dumps(c, ensure_ascii=False))
+                    else:
+                        parts.append(str(c))
+
+                joined = "\n".join([p for p in parts if p is not None and str(p).strip() != ""]).strip()
+                if joined:
+                    return joined
+
+                # content 存在但为空时，回退到整体字符串，避免吞返回
+                return str(result)
             return str(result)
     except Exception as e:
         logger.error(f"MCP 调用失败 [{tool_name}]: {e}")

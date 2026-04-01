@@ -302,11 +302,208 @@ class SessionService:
         query = self._session_query(session_id, app_id)
         patch = {"updated_at": self._now_iso()}
         # 只接受合法字段
-        allowed = {"status", "metadata"}
+        allowed = {
+            "status",
+            "metadata",
+            "pending_status",
+            "pending_data",
+            "pending_expires_at",
+        }
         for k, v in kwargs.items():
             if k in allowed and v is not None:
                 patch[k] = v
         return self.crud.update_document(self.collection, query, patch)
+
+    # ------------------------
+    # HITL 挂起/恢复
+    # ------------------------
+    def suspend_session(
+        self,
+        session_id: str,
+        app_id: str,
+        interaction_id: str,
+        question: str,
+        input_type: str,
+        expected_input: Optional[List[str]] = None,
+        expected_schema: Optional[Dict[str, Any]] = None,
+        timeout_seconds: int = 300,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        now_ts = datetime.now(timezone.utc)
+        expires_at = now_ts.timestamp() + max(int(timeout_seconds), 1)
+
+        pending_data: Dict[str, Any] = {
+            "interaction_id": interaction_id,
+            "question": question,
+            "input_type": input_type,
+            "expected_input": expected_input or [],
+            "expected_schema": expected_schema or {},
+            "timeout_seconds": timeout_seconds,
+            "suspended_at": now_ts.isoformat(),
+            "context": context or {},
+            "resumed": False,
+        }
+
+        return self.update_session(
+            session_id,
+            app_id=app_id,
+            pending_status="suspended",
+            pending_data=pending_data,
+            pending_expires_at=datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+        )
+
+    def get_pending_interaction(self, session_id: str, app_id: str = "") -> Optional[Dict[str, Any]]:
+        doc = self.get_session_metadata(session_id, app_id=app_id)
+        if not doc:
+            return None
+        pending_status = (doc.get("pending_status") or "active")
+        if pending_status != "suspended":
+            return None
+
+        # 读取时顺带做超时判定，避免长时间停留在 suspended
+        expires_at = doc.get("pending_expires_at")
+        if expires_at:
+            try:
+                exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) > exp_dt:
+                    self.mark_pending_timeout(session_id, app_id=app_id)
+                    return {
+                        "pending_status": "timeout_failed",
+                        "pending_data": doc.get("pending_data") or {},
+                        "pending_expires_at": expires_at,
+                    }
+            except Exception:
+                pass
+
+        return {
+            "pending_status": pending_status,
+            "pending_data": doc.get("pending_data") or {},
+            "pending_expires_at": doc.get("pending_expires_at"),
+        }
+
+    def mark_pending_timeout(self, session_id: str, app_id: str = "") -> int:
+        pending = self.get_pending_interaction(session_id, app_id=app_id)
+        if not pending:
+            return 0
+
+        pd = pending.get("pending_data") or {}
+        pd["timeout_at"] = self._now_iso()
+        pd["timeout_reason"] = "user_input_timeout"
+
+        return self.update_session(
+            session_id,
+            app_id=app_id,
+            pending_status="timeout_failed",
+            pending_data=pd,
+            pending_expires_at=None,
+        )
+
+    def resume_pending_interaction(
+        self,
+        session_id: str,
+        app_id: str,
+        interaction_id: str,
+        user_input: Any,
+    ) -> Dict[str, Any]:
+        session_doc = self.get_session_metadata(session_id, app_id=app_id)
+        if not session_doc:
+            return {"ok": False, "code": "SESSION_NOT_FOUND", "message": "session 不存在"}
+
+        pending_status = session_doc.get("pending_status") or "active"
+        pending_data = session_doc.get("pending_data") or {}
+
+        if pending_status != "suspended":
+            if pending_status == "timeout_failed":
+                return {"ok": False, "code": "PENDING_TIMEOUT", "message": "该交互已超时"}
+            return {"ok": False, "code": "NO_PENDING", "message": "当前会话无挂起交互"}
+
+        current_interaction = (pending_data.get("interaction_id") or "").strip()
+        if interaction_id and current_interaction and interaction_id != current_interaction:
+            return {"ok": False, "code": "INTERACTION_MISMATCH", "message": "interaction_id 不匹配"}
+
+        expires_at = session_doc.get("pending_expires_at")
+        if expires_at:
+            try:
+                exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) > exp_dt:
+                    self.mark_pending_timeout(session_id, app_id=app_id)
+                    return {"ok": False, "code": "PENDING_TIMEOUT", "message": "该交互已超时"}
+            except Exception:
+                pass
+
+        if pending_data.get("resumed"):
+            return {
+                "ok": True,
+                "code": "ALREADY_RESUMED",
+                "message": "该交互已恢复",
+                "pending_data": pending_data,
+            }
+
+        pending_data["user_input"] = user_input
+        pending_data["resumed"] = True
+        pending_data["resumed_at"] = self._now_iso()
+
+        self.update_session(
+            session_id,
+            app_id=app_id,
+            pending_status="active",
+            pending_data=pending_data,
+            pending_expires_at=None,
+        )
+
+        return {
+            "ok": True,
+            "code": "RESUMED",
+            "message": "交互已恢复",
+            "pending_data": pending_data,
+        }
+
+    def build_resume_graph_inputs(self, session_id: str, app_id: str) -> Optional[Dict[str, Any]]:
+        """从已恢复的 pending_data 构建图继续执行所需 inputs。"""
+        session_doc = self.get_session_metadata(session_id, app_id=app_id)
+        if not session_doc:
+            return None
+
+        pending_data = session_doc.get("pending_data") or {}
+        if not pending_data.get("resumed"):
+            return None
+
+        context = pending_data.get("context") or {}
+        user_input = pending_data.get("user_input")
+        question = pending_data.get("question") or ""
+        current_agent = context.get("current_agent") or ""
+
+        # 组装一条用户消息继续驱动图执行
+        if isinstance(user_input, (dict, list)):
+            user_input_text = json.dumps(user_input, ensure_ascii=False)
+        else:
+            user_input_text = str(user_input)
+
+        followup_message = user_input_text.strip() if user_input_text else ""
+        if question and followup_message:
+            followup_message = f"【HITL用户输入】问题：{question}\n用户输入：{followup_message}"
+        elif not followup_message:
+            followup_message = "【HITL用户输入】（空输入）"
+
+        session_files = self.get_session_files_content(session_id, app_id=app_id)
+
+        return {
+            "session_id": session_id,
+            "app_id": app_id,
+            "scene_id": "default",
+            "selected_role_id": "",
+            "current_agent": current_agent,
+            "next": "RUN_AGENT" if current_agent else "",
+            "messages": [("user", followup_message)],
+            "session_files": [
+                {
+                    "file_id": f.get("file_id") or "",
+                    "file_name": f.get("file_name") or "",
+                    "main_info": f.get("main_info") or {},
+                }
+                for f in (session_files or [])
+            ],
+        }
 
     # ------------------------
     # 文件关联
