@@ -11,16 +11,6 @@ from .Schema import (
 )
 from logger import logger
 
-class PromptService(BaseConfigService):
-    collection = "prompts"
-    model_class = PromptModel
-
-    def get_enabled(self) -> List[Dict]:
-        return self.query({"enabled": "true"})
-
-    def get_by_type(self, prompt_type: str) -> List[Dict]:
-        return self.query({"prompt_type": prompt_type})
-
 class BaseConfigService:
     """配置服务基类，通用CRUD"""
 
@@ -129,6 +119,15 @@ class GatewayChannelService(BaseConfigService):
     def get_enabled_channels(self) -> List[Dict]:
         return self.query({"enabled": "true"})
 
+class PromptService(BaseConfigService):
+    collection = "prompts"
+    model_class = PromptModel
+
+    def get_enabled(self):
+        return self.query({"enabled": "true"})
+
+    def get_by_type(self, prompt_type: str):
+        return self.query({"prompt_type": prompt_type})
 
 class ToolService(BaseConfigService):
     collection = "tools"
