@@ -4,6 +4,7 @@
 from typing import Optional, Dict, Tuple
 from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 
 from app.core.llm import get_model, get_model_by_level_id
 from dataBase.ConfigService import SceneService, RoleService, SubAgentService
@@ -76,7 +77,7 @@ def _load_all_sub_agents_from_db() -> Dict[str, str]:
     return result
 
 
-def supervisor_node(state):
+def supervisor_node(state, config: RunnableConfig = None):
     scene_id = state.get("scene_id", "default")
     selected_role_id = state.get("selected_role_id", "")  # ← 新增
     messages = state.get("messages", [])
@@ -138,7 +139,7 @@ def supervisor_node(state):
     logger.info(f"Supervisor: scene={scene_id}, role={role_name}, sub_agents={routable_names}")
 
     try:
-        decision = llm_decision.invoke([("system", route_prompt), *messages])
+        decision = llm_decision.invoke([("system", route_prompt), *messages], config=config)
         nxt = (decision.next or "").strip()
 
         if nxt == "FINISH":

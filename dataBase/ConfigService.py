@@ -195,6 +195,9 @@ class ChatLogService(BaseConfigService):
                 # ===== 新增 =====
                 "model_detail",
                 "final_model",
+                "cached_tokens",
+                "cache_hit_calls",
+                "cache_hit",
             }
             clean_data = {k: v for k, v in log_data.items() if k in allowed_keys}
             log_model = ChatLogModel(**clean_data)

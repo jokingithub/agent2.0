@@ -317,6 +317,9 @@ async def _save_chat_log(
             "completion_tokens": collector.completion_tokens or None,
             "model_detail": collector.call_details if collector.call_details else None,
             "final_model": collector.final_model,
+            "cached_tokens": collector.cached_tokens or 0,
+            "cache_hit_calls": collector.cache_hit_calls or 0,
+            "cache_hit": bool(collector.cache_hit_calls > 0),
         }
         await log_service.save_log_async(log_data)
         logger.info(
@@ -350,7 +353,8 @@ def _print_request_token_summary(
         f"calls={len(collector.call_details)} total={collector.total_tokens} "
         f"prompt={collector.prompt_tokens} completion={collector.completion_tokens} "
         f"final_model={collector.final_model} final_agent={collector.final_agent} "
-        f"errors={collector.error_count}"
+        f"errors={collector.error_count} "
+        f"cached_tokens={collector.cached_tokens} cache_hit_calls={collector.cache_hit_calls} "
     )
     if collector.last_error:
         logger.info(f"[TOKEN][REQ][LAST_ERROR] {collector.last_error}")
