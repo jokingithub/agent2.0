@@ -221,6 +221,8 @@ async def generic_tool_runner(state: AgentState, config: RunnableConfig):
                 "expected_schema": expected_schema,
                 "tool_call_id": getattr(msg, "tool_call_id", "") or "",
                 "current_agent": current_agent,
+                "scene_id": state.get("scene_id", ""),
+                "selected_role_id": state.get("selected_role_id", ""),
             }
             break
 
