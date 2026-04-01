@@ -181,6 +181,9 @@ class ChatLogModel(BaseModel):
     session_id: str = ""
     request_content: str = ""
     response_content: str = ""
+    cached_tokens: Optional[int] = 0
+    cache_hit_calls: Optional[int] = 0
+    cache_hit: Optional[bool] = False
     # 耗时
     request_time: Optional[str] = None
     first_token_time: Optional[str] = None
