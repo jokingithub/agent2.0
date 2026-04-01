@@ -42,6 +42,14 @@ class SessionModel(BaseModel):
     session_id: str
     created_at: datetime = Field(default_factory=datetime.now)
     file_list: List[str] = Field(default_factory=list)
+    status: str = "active"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    updated_at: Optional[datetime] = None
+
+    # HITL（Human-in-the-loop）挂起状态
+    pending_status: str = "active"   # active / suspended / timeout_failed
+    pending_data: Optional[Dict[str, Any]] = None
+    pending_expires_at: Optional[str] = None
 
 #============================================================
 # 配置相关模型

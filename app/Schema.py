@@ -321,3 +321,11 @@ class ReplaceMessagesRequest(BaseModel):
     """替换整个消息列表"""
     app_id: str = Field("", description="应用ID")
     messages: List[Dict[str, Any]] = Field(..., description="完整消息列表")
+
+
+class ResumeHITLRequest(BaseModel):
+    """恢复 HITL 挂起交互"""
+    app_id: str = Field(..., min_length=1, description="应用ID")
+    interaction_id: str = Field(..., min_length=1, description="交互ID")
+    user_input: Any = Field(..., description="用户输入（文本/审批值/结构化对象）")
+    recursion_limit: int = Field(30, ge=1, le=200, description="恢复后续跑图的递归上限")

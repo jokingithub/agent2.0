@@ -185,6 +185,45 @@ async def generic_tool_runner(state: AgentState, config: RunnableConfig):
 
     node = ToolNode(tools)
     result = await node.ainvoke(state, config=config)
+
+    # HITL 协议识别：工具返回以 __HITL__ 开头的 JSON 字符串
+    if isinstance(result, dict):
+        out_messages = result.get("messages") or []
+        for msg in out_messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if not isinstance(content, str) or not content.startswith("__HITL__"):
+                continue
+
+            payload_str = content[len("__HITL__"):].strip()
+            try:
+                payload = json.loads(payload_str) if payload_str else {}
+            except Exception:
+                payload = {}
+
+            # 兼容兜底字段
+            interaction_id = payload.get("interaction_id", "")
+            question = payload.get("question", "")
+            input_type = payload.get("input_type", "text")
+            timeout_seconds = int(payload.get("timeout_seconds", 300) or 300)
+            expected_input = payload.get("expected_input") or []
+            expected_schema = payload.get("expected_schema") or {}
+
+            result["user_input_required"] = True
+            result["suspended_action"] = "hitl_user_input"
+            result["pending_context"] = {
+                "interaction_id": interaction_id,
+                "question": question,
+                "input_type": input_type,
+                "timeout_seconds": timeout_seconds,
+                "expected_input": expected_input,
+                "expected_schema": expected_schema,
+                "tool_call_id": getattr(msg, "tool_call_id", "") or "",
+                "current_agent": current_agent,
+            }
+            break
+
     if isinstance(result, dict):
         result["current_agent"] = current_agent
         return result

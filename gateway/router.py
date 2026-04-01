@@ -146,6 +146,43 @@ async def gateway_chat_stream(
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
+
+@protected_router.get("/sessions/{session_id}/hitl/status")
+async def gateway_hitl_status(
+    session_id: str,
+    app_id: str = Query(..., min_length=1, description="应用ID"),
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/sessions/{session_id}/hitl/status"
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.get(target_url, params={"app_id": app_id})
+
+    content_type = resp.headers.get("content-type", "")
+    if "application/json" in content_type.lower():
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+    return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+
+
+@protected_router.post("/sessions/{session_id}/hitl/resume")
+async def gateway_hitl_resume(
+    session_id: str,
+    request: Request,
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/sessions/{session_id}/hitl/resume"
+    body = await request.json()
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(target_url, json=body)
+
+    content_type = resp.headers.get("content-type", "")
+    if "application/json" in content_type.lower():
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+    return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+
 @protected_router.get("/file_content",response_model=FileInfo)
 async def gateway_file(
     session_id: str = Query(...),
