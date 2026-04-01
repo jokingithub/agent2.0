@@ -12,6 +12,7 @@ from dataBase.ConfigService import (
     ToolService, ChatLogService,
     RoleService, SubAgentService, SkillService,
     FileProcessingService, SceneService, ElementExtractionModelConfigService,
+    PromptService,   # 新增
 )
 from dataBase.Schema import (
     ModelConnectionModel, ModelLevelModel,
@@ -19,6 +20,7 @@ from dataBase.Schema import (
     ToolModel, ChatLogModel,
     RoleModel, SubAgentModel, SkillModel,
     FileProcessingModel, SceneModel,
+    PromptModel,   # 新增
 )
 from app.Schema import (
     GatewayAppCreateRequest,ModelConnectionCreateRequest,ModelConnectionUpdateRequest,
@@ -937,4 +939,4 @@ register_crud_routes("sub-agents", SubAgentService, SubAgentModel, "子Agent")
 register_crud_routes("skills", SkillService, SkillModel, "技能")
 register_crud_routes("file-processing", FileProcessingService, FileProcessingModel, "文件处理")
 register_crud_routes("scenes", SceneService, SceneModel, "场景")
-
+register_crud_routes("prompts", PromptService, PromptModel, "提示词")

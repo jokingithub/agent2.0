@@ -182,6 +182,22 @@ async def gateway_hitl_resume(
         return JSONResponse(status_code=resp.status_code, content=resp.json())
 
     return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+    async def stream_gen():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", target_url, json=body) as resp:
+                if resp.status_code >= 400:
+                    raw = await resp.aread()
+                    payload = {
+                        "status": resp.status_code,
+                        "detail": raw.decode("utf-8", errors="ignore"),
+                    }
+                    yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
+
+                async for chunk in resp.aiter_text():
+                    yield chunk
+
+    return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
 @protected_router.get("/file_content",response_model=FileInfo)
 async def gateway_file(

@@ -57,6 +57,8 @@ def _suspend_handler(state: AgentState):
                 "messages": [],
                 "tool_call_id": pending.get("tool_call_id", ""),
                 "current_agent": pending.get("current_agent", "") or state.get("current_agent", ""),
+                "scene_id": pending.get("scene_id", "") or state.get("scene_id", ""),
+                "selected_role_id": pending.get("selected_role_id", "") or state.get("selected_role_id", ""),
             },
         )
     except Exception as e:

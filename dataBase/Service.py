@@ -490,8 +490,8 @@ class SessionService:
         return {
             "session_id": session_id,
             "app_id": app_id,
-            "scene_id": "default",
-            "selected_role_id": "",
+            "scene_id": context.get("scene_id") or "default",
+            "selected_role_id": context.get("selected_role_id") or "",
             "current_agent": current_agent,
             "next": "RUN_AGENT" if current_agent else "",
             "messages": [("user", followup_message)],

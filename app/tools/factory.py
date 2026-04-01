@@ -149,28 +149,19 @@ async def _call_remote_mcp(url: str, tool_name: str, kwargs: dict) -> str:
         logger.error(f"MCP 调用失败 [{tool_name}]: {e}")
         return f"工具调用失败: {e}"
 
-
 def _build_mcp_kwargs(input_value: Any, arg_name: str = "query", arg_names: list[str] | None = None) -> dict:
-    """将 LangChain 输入转换为 MCP kwargs。
-
-    规则：
-    - dict 输入：
-      - 若配置了 arg_names，则按白名单过滤后透传；
-      - 否则若已包含 arg_name 键，直接透传；
-      - 否则包装为 {arg_name: input_value}（适配 data:dict 场景）。
-    - str 输入：尝试 JSON 解析为 dict，失败则按单参数包装。
-    - 其他输入：转为字符串按单参数包装。
-    """
     if isinstance(input_value, dict):
-        # 先清理 None 值，避免把默认空字段（如 data=None）透传给远端 MCP
         cleaned = {k: v for k, v in input_value.items() if v is not None}
 
+        # 1) 配了 arg_names：严格白名单
         if arg_names:
-            filtered = {k: cleaned.get(k) for k in arg_names if k in cleaned}
-            if filtered:
-                return filtered
+            return {k: cleaned.get(k) for k in arg_names if k in cleaned}
+
+        # 2) 没配 arg_names：只传 arg_name 本身，不再透传整个 cleaned
         if arg_name in cleaned:
-            return cleaned
+            return {arg_name: cleaned.get(arg_name)}
+
+        # 3) 都没有：按单参数包装
         return {arg_name: cleaned}
 
     if isinstance(input_value, str):
@@ -180,11 +171,9 @@ def _build_mcp_kwargs(input_value: Any, arg_name: str = "query", arg_names: list
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
                     if arg_names:
-                        filtered = {k: parsed.get(k) for k in arg_names if k in parsed}
-                        if filtered:
-                            return filtered
+                        return {k: parsed.get(k) for k in arg_names if k in parsed}
                     if arg_name in parsed:
-                        return parsed
+                        return {arg_name: parsed.get(arg_name)}
                     return {arg_name: parsed}
             except Exception:
                 pass
@@ -212,7 +201,9 @@ def _create_mcp_tool(tool_config: dict) -> Tool:
     else:
         dynamic_fields[arg_name] = (Any, None)
     # 运行时注入常用字段，声明为可选，避免校验报错
-    dynamic_fields.setdefault("app_id", (str, None))
+    allow_runtime_app_id = bool(config.get("allow_runtime_app_id", False))
+    if allow_runtime_app_id:
+        dynamic_fields.setdefault("app_id", (str, None))
 
     class _MCPArgsBase(BaseModel):
         model_config = ConfigDict(extra="allow")
