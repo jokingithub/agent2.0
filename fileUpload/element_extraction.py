@@ -32,7 +32,7 @@ _DEFAULT_PROMPT_TEMPLATE = """# Role
 4. 保持数值的原始精度。"""
 
 
-def _parse_json_response(text: str) -> dict:
+def _parse_json_response(text: str, expected_fields: list[str] | None = None) -> dict:
     """从 LLM 回复中提取 JSON"""
     # 直接解析
     try:
@@ -53,6 +53,41 @@ def _parse_json_response(text: str) -> dict:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             pass
+    # 兜底：解析“字段：值”列表（如 markdown 条目）
+    parsed: dict[str, str | None] = {}
+    lines = text.splitlines()
+    kv_patterns = [
+        re.compile(r'^\s*[*\-•]?\s*\*\*?\s*([^：:\n]+?)\s*\*\*?\s*[：:]\s*(.*?)\s*$'),
+        re.compile(r'^\s*[*\-•]?\s*([^：:\n]+?)\s*[：:]\s*(.*?)\s*$'),
+    ]
+    for line in lines:
+        for pat in kv_patterns:
+            m = pat.match(line)
+            if not m:
+                continue
+            key = (m.group(1) or "").strip().strip("*` ")
+            val = (m.group(2) or "").strip()
+            if not key:
+                continue
+            parsed[key] = val if val else None
+            break
+
+    if parsed:
+        if expected_fields:
+            normalized_map = {
+                re.sub(r"\s+", "", f).replace("：", ":").strip(" :"): f
+                for f in expected_fields
+            }
+            out: dict[str, str | None] = {f: None for f in expected_fields}
+            for k, v in parsed.items():
+                nk = re.sub(r"\s+", "", k).replace("：", ":").strip(" :")
+                target = normalized_map.get(nk)
+                if target:
+                    out[target] = v
+            if any(v is not None for v in out.values()):
+                return out
+        return parsed
+
     logger.error(f"无法解析 LLM 返回的 JSON: {text[:200]}")
     return {"_parse_error": True, "_raw": text[:500]}
 
@@ -133,7 +168,7 @@ def element_extraction(file_content: str, file_type: str) -> dict:
 
     try:
         response = model.invoke(messages)
-        result = _parse_json_response(response.content)
+        result = _parse_json_response(response.content, expected_fields=fields)
         logger.info(f"要素抽取完成: {list(result.keys())}")
         return result
     except Exception as e:
