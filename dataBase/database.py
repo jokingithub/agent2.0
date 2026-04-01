@@ -39,6 +39,7 @@ class Database:
           "skills",
           "file_processing",
           "scenes",
+          "prompts",   # 新增
       ]
 
 
@@ -112,6 +113,9 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_scenes_scene_code ON scenes ((data->>'scene_code'));
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_app_session ON memories ((COALESCE(data->>'app_id','')), (data->>'session_id'));
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_app_session ON sessions ((COALESCE(data->>'app_id','')), (data->>'session_id'));
+                    CREATE INDEX IF NOT EXISTS idx_prompts_name ON prompts ((data->>'name'));
+                    CREATE INDEX IF NOT EXISTS idx_prompts_type ON prompts ((data->>'prompt_type'));
+                    CREATE INDEX IF NOT EXISTS idx_prompts_enabled ON prompts ((data->>'enabled'));
 
                 """))
                 conn.commit()

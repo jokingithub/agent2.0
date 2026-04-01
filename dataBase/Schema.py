@@ -274,3 +274,20 @@ class SceneModel(BaseModel):
     report_config: Optional[Dict[str, Any]] = None  # workflow配置：文件、数据等
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+
+class PromptModel(BaseModel):
+    """Prompt 模板配置"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: Optional[Any] = Field(alias="_id", default=None)
+    name: str                                # 模板名（唯一标识建议前端控制）
+    prompt_type: str = "general"             # system / role / sub_agent / workflow / general
+    content: str                             # 提示词正文
+    description: Optional[str] = None
+    variables: List[str] = Field(default_factory=list)  # 变量名列表，如 ["company_name", "date"]
+    tags: List[str] = Field(default_factory=list)
+    enabled: bool = True
+    version: int = 1
+
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
