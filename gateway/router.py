@@ -373,3 +373,26 @@ async def gateway_remove_file_from_session(
             raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+@protected_router.put("/memories/{session_id}")
+async def gateway_replace_memories(
+    session_id: str,
+    request: Request,
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/memories/{session_id}"
+    body = await request.json()
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.put(target_url, json=body)
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    content_type = resp.headers.get("content-type", "")
+    if "application/json" in content_type.lower():
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+    return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
