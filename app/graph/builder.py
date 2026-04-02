@@ -15,7 +15,7 @@ def _route_from_supervisor(state: AgentState) -> str:
     """
     兼容路由：
     - 标准: next=RUN_AGENT/FINISH
-    - 兼容旧: next=某个agent名（如“可丽饼”）=> 当作 RUN_AGENT
+    - 兼容旧: next=某个agent名=> 当作 RUN_AGENT
     """
     nxt = (state.get("next") or "").strip()
     if nxt in ("RUN_AGENT", "FINISH"):
