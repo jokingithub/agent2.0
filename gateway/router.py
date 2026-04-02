@@ -174,14 +174,6 @@ async def gateway_hitl_resume(
     target_url = f"{backend}/sessions/{session_id}/hitl/resume"
     body = await request.json()
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(target_url, json=body)
-
-    content_type = resp.headers.get("content-type", "")
-    if "application/json" in content_type.lower():
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
-
-    return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
     async def stream_gen():
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", target_url, json=body) as resp:
