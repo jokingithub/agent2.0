@@ -3,28 +3,34 @@ import os
 import sys
 from pathlib import Path
 
-# --- 1. 核心修复：手动将项目根目录添加到搜索路径 ---
-# __file__ 是 .../mcp-service/core/config.py
-# .parent 是 .../mcp-service/core/
-# .parents[1] 是 .../mcp-service/
-# .parents[2] 是 .../ (即 dataBase 和 logger 所在的根目录)
 _ROOT = str(Path(__file__).resolve().parents[2])
 
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-# --- 2. 现在可以安全导入外部模块了 ---
 from fastmcp import FastMCP
-from dataBase.ConfigService import ToolService  # 此时可以找到了
-from logger import logger                       # 此时可以找到了
+from dataBase.ConfigService import ToolService
+from logger import logger
 
-# --- 3. 原有配置信息 ---
-# 获取环境变量或设置默认值
+# --- 配置 ---
 PORT = int(os.getenv("MCP_PORT", "9001"))
-# 注意：如果是在 Docker 容器内，HOST_FOR_CLIENT 建议设为 0.0.0.0 或具体的内网 IP
-HOST_FOR_CLIENT = os.getenv("MCP_HOST", "127.0.0.1")
-TOOL_URL = f"http://{HOST_FOR_CLIENT}:{PORT}/sse"
 
-# --- 4. 初始化实例 ---
+# 监听地址（给 mcp.run 用，容器内用 0.0.0.0）
+BIND_HOST = os.getenv("MCP_BIND_HOST", "0.0.0.0")
+
+# 注册地址（写入 DB 给其他服务调用，必须是可达的服务名）
+# 优先读 MCP_PUBLIC_URL，其次用 MCP_SERVICE_HOST 拼接，兜底 mcp-service
+_service_host = os.getenv("MCP_SERVICE_HOST", "mcp-service")
+TOOL_URL = os.getenv("MCP_PUBLIC_URL", f"http://{_service_host}:{PORT}/sse")
+
+# 防呆：拒绝把 0.0.0.0 / 127.0.0.1 写进 DB
+if "0.0.0.0" in TOOL_URL or "127.0.0.1" in TOOL_URL:
+    logger.warning(
+        f"⚠️ TOOL_URL={TOOL_URL} 包含本地地址，自动替换为 mcp-service。"
+        f"建议设置环境变量 MCP_PUBLIC_URL 或 MCP_SERVICE_HOST"
+    )
+    TOOL_URL = f"http://mcp-service:{PORT}/sse"
+
+# --- 初始化 ---
 mcp = FastMCP("MCPServer")
 tool_service = ToolService()
