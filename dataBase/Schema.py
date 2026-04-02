@@ -231,6 +231,9 @@ class SubAgentModel(BaseModel):
     name: str
     description: Optional[str] = None
     system_prompt: str# 独立提示词
+    react_prompt_template: Optional[str] = None
+    max_steps: int = 12
+    tool_policy: Optional[Dict[str, Any]] = None
     model_id: str                          # 从模型池选，关联 ModelLevel ID
     skill_ids: List[str] = Field(default_factory=list)# 关联 Skill ID 列表
     tool_ids: List[str] = Field(default_factory=list)    # 关联 Tool ID 列表

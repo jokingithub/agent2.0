@@ -472,6 +472,18 @@ class SessionService:
         user_input = pending_data.get("user_input")
         question = pending_data.get("question") or ""
         current_agent = context.get("current_agent") or ""
+        current_actor = context.get("current_actor") or (current_agent if current_agent else "supervisor")
+        resume_next = context.get("next") or ("RUN_AGENT" if current_agent else "")
+        try:
+            react_step = int(context.get("react_step") or 0)
+        except Exception:
+            react_step = 0
+        try:
+            max_steps = int(context.get("max_steps") or 12)
+        except Exception:
+            max_steps = 12
+        if max_steps <= 0:
+            max_steps = 12
 
         # 组装一条用户消息继续驱动图执行
         if isinstance(user_input, (dict, list)):
@@ -485,6 +497,34 @@ class SessionService:
         elif not followup_message:
             followup_message = "【HITL用户输入】（空输入）"
 
+        # 恢复路径补齐近期历史，避免多轮 HITL 后上下文断链
+        history = self.memory_service.get_recent_messages(session_id, last_n=30, app_id=app_id)
+        history_messages: List[Any] = []
+        for msg in (history or []):
+            role = (msg.get("role") or "").strip()
+            content = msg.get("content")
+            if not role or content is None:
+                continue
+            text = str(content).strip()
+            if not text:
+                continue
+            history_messages.append((role, text))
+
+        # 兼容历史挂起上下文里遗留的 messages（老会话）
+        context_messages = context.get("messages") or []
+        normalized_context_messages: List[Any] = []
+        if isinstance(context_messages, list):
+            for m in context_messages:
+                if isinstance(m, tuple) and len(m) >= 2:
+                    normalized_context_messages.append((str(m[0]), str(m[1])))
+                elif isinstance(m, dict):
+                    r = str(m.get("role") or "").strip()
+                    c = m.get("content")
+                    if r and c is not None:
+                        normalized_context_messages.append((r, str(c)))
+
+        resume_messages = history_messages + normalized_context_messages + [("user", followup_message)]
+
         session_files = self.get_session_files_content(session_id, app_id=app_id)
 
         return {
@@ -493,8 +533,15 @@ class SessionService:
             "scene_id": context.get("scene_id") or "default",
             "selected_role_id": context.get("selected_role_id") or "",
             "current_agent": current_agent,
-            "next": "RUN_AGENT" if current_agent else "",
-            "messages": [("user", followup_message)],
+            "current_actor": current_actor,
+            "next": resume_next,
+            "resume_mode": True,
+            "react_step": react_step,
+            "max_steps": max_steps,
+            "messages": resume_messages,
+            "last_action": context.get("last_action") if isinstance(context.get("last_action"), dict) else None,
+            "last_observation": context.get("last_observation") if isinstance(context.get("last_observation"), dict) else None,
+            "trace": context.get("trace") if isinstance(context.get("trace"), list) else None,
             "session_files": [
                 {
                     "file_id": f.get("file_id") or "",

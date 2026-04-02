@@ -249,6 +249,7 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
             event = {
                 "node": node_name,
                 "message_type": "tool_call",
+                "event_type": "action",
                 "message": f"正在调用工具: {', '.join(classified.get('tool_names', []))}",
                 "tool_names": classified.get("tool_names", []),
             }
@@ -260,6 +261,16 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
             "message_type": classified["message_type"],
             "message": content,
         }
+
+        # ReAct 事件语义映射（重构优先）
+        if classified["message_type"] == "assistant":
+            event["event_type"] = "reasoning"
+        elif classified["message_type"] == "tool_call":
+            event["event_type"] = "action"
+        elif classified["message_type"] == "tool":
+            event["event_type"] = "tool_result"
+        else:
+            event["event_type"] = "observation"
 
         if classified["message_type"] == "tool":
             event["tool_name"] = classified.get("tool_name", "")
@@ -638,6 +649,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     suspend_event = {
                         "node": node_name,
                         "message_type": "suspend",
+                        "event_type": "observation",
                         "message": "需要用户输入，流程已挂起",
                         "interaction_id": pending.get("interaction_id", ""),
                         "question": pending.get("question", ""),
@@ -767,6 +779,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             suspend_payload = {
                                 "node": node_name,
                                 "message_type": "suspend",
+                                "event_type": "observation",
                                 "message": "需要用户输入，流程已挂起",
                                 "interaction_id": pending.get("interaction_id", ""),
                                 "question": pending.get("question", ""),
@@ -969,6 +982,7 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
                             suspend_payload = {
                                 "node": node_name,
                                 "message_type": "suspend",
+                                "event_type": "observation",
                                 "message": "需要用户输入，流程已挂起",
                                 "interaction_id": pending.get("interaction_id", ""),
                                 "question": pending.get("question", ""),

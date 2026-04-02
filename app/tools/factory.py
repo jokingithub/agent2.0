@@ -289,6 +289,24 @@ def load_tool_from_config(tool_id: str, sub_agent_id: str | None = None) -> Tool
         logger.warning(f"未知工具类型 '{tool_type}'，工具: {tool_config.get('name')}")
         return None
 
+
+def load_tools_from_ids(tool_ids: List[str], sub_agent_id: str | None = None) -> List[Tool]:
+    """按工具ID列表加载工具。"""
+    tools: List[Tool] = []
+    for tid in tool_ids or []:
+        t = load_tool_from_config(tid, sub_agent_id=sub_agent_id)
+        if t:
+            tools.append(t)
+    return tools
+
+
+def load_tools_for_role(role_config: dict | None) -> List[Tool]:
+    """为主Agent（role/supervisor）加载可用工具。"""
+    if not role_config:
+        return []
+    tool_ids = role_config.get("tool_ids", []) or []
+    return load_tools_from_ids(tool_ids, sub_agent_id=None)
+
 def load_tools_for_sub_agent(sub_agent_id: str) -> List[Tool]:
     """为子 Agent 加载所有关联工具"""
     agent_config = _sub_agent_service.get_by_id(sub_agent_id)
@@ -303,9 +321,4 @@ def load_tools_for_sub_agent(sub_agent_id: str) -> List[Tool]:
         if skill:
             all_tool_ids.update(skill.get("tool_ids", []))
 
-    tools = []
-    for tid in all_tool_ids:
-        t = load_tool_from_config(tid, sub_agent_id=sub_agent_id)
-        if t:
-            tools.append(t)
-    return tools
+    return load_tools_from_ids(list(all_tool_ids), sub_agent_id=sub_agent_id)
