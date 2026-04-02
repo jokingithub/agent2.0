@@ -2,7 +2,7 @@
 from core.decorators import register_tool
 from dataBase.Service import FileService
 
-@register_tool(category="file", arg_name="file_id")
+@register_tool(category="file")
 def read_file_content(file_id: str, app_id: str = "") -> str:
     """
     读取指定文件的完整内容（支持 app_id 隔离）。

@@ -149,61 +149,78 @@ async def _call_remote_mcp(url: str, tool_name: str, kwargs: dict) -> str:
         logger.error(f"MCP 调用失败 [{tool_name}]: {e}")
         return f"工具调用失败: {e}"
 
-def _build_mcp_kwargs(input_value: Any, arg_name: str = "query", arg_names: list[str] | None = None) -> dict:
-    if isinstance(input_value, dict):
-        cleaned = {k: v for k, v in input_value.items() if v is not None}
-
-        # 1) 配了 arg_names：严格白名单
-        if arg_names:
-            return {k: cleaned.get(k) for k in arg_names if k in cleaned}
-
-        # 2) 没配 arg_names：只传 arg_name 本身，不再透传整个 cleaned
-        if arg_name in cleaned:
-            return {arg_name: cleaned.get(arg_name)}
-
-        # 3) 都没有：按单参数包装
-        return {arg_name: cleaned}
-
+def _build_mcp_kwargs(input_value: Any, arg_defs: dict[str, dict]) -> dict:
+    # 支持 str(JSON) / dict 输入
     if isinstance(input_value, str):
         text = input_value.strip()
         if text:
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
-                    if arg_names:
-                        return {k: parsed.get(k) for k in arg_names if k in parsed}
-                    if arg_name in parsed:
-                        return {arg_name: parsed.get(arg_name)}
-                    return {arg_name: parsed}
+                    source = parsed
+                else:
+                    raise ValueError("字符串参数必须是JSON对象")
             except Exception:
-                pass
-        return {arg_name: input_value}
+                raise ValueError("参数必须是对象(dict)或可解析为对象的JSON字符串")
+        else:
+            source = {}
+    elif isinstance(input_value, dict):
+        source = {k: v for k, v in input_value.items() if v is not None}
+    else:
+        raise ValueError("参数必须是对象(dict)")
 
-    return {arg_name: str(input_value)}
+    result: dict[str, Any] = {}
+    missing_required: list[str] = []
+
+    for name, meta in arg_defs.items():
+        required = bool((meta or {}).get("required", False))
+        has_default = "default" in (meta or {})
+
+        if name in source:
+            result[name] = source[name]
+        elif has_default:
+            result[name] = meta["default"]
+        elif required:
+            missing_required.append(name)
+
+    if missing_required:
+        raise ValueError(f"缺少必填参数: {', '.join(missing_required)}")
+
+    return result
+
+def _type_name_to_py(type_name: str):
+    mapping = {
+        "string": str,
+        "integer": int,
+        "number": float,
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+        "any": Any,
+    }
+    return mapping.get((type_name or "any").lower(), Any)
 
 def _create_mcp_tool(tool_config: dict) -> Tool:
-    """将数据库记录转换为 LangChain Tool"""
     name = tool_config.get("name", "unnamed")
     description = tool_config.get("description", "")
     url = tool_config.get("url", "http://localhost:9001/sse")
-    
+
     config = tool_config.get("config") or {}
     remote_tool_name = config.get("remote_tool_name", name)
-    # 映射参数名，如果没配则默认为 query
-    arg_name = config.get("arg_name", "query")
-    arg_names = config.get("arg_names") if isinstance(config.get("arg_names"), list) else None
 
-    # 生成 StructuredTool 入参模型，避免 SimpleTool 的单参数限制
+    # 新格式：arg_names 是 dict
+    arg_defs = config.get("arg_names") if isinstance(config.get("arg_names"), dict) else {}
+    if not arg_defs:
+        # 你说 tool 少，可以直接强约束，避免静默退化
+        raise ValueError(f"MCP工具[{name}]缺少 config.arg_names(字典格式)")
+
     dynamic_fields: dict[str, tuple[type, Any]] = {}
-    if arg_names:
-        for k in arg_names:
-            dynamic_fields[k] = (Any, None)
-    else:
-        dynamic_fields[arg_name] = (Any, None)
-    # 运行时注入常用字段，声明为可选，避免校验报错
-    allow_runtime_app_id = bool(config.get("allow_runtime_app_id", False))
-    if allow_runtime_app_id:
-        dynamic_fields.setdefault("app_id", (str, None))
+    for arg_name, meta in arg_defs.items():
+        meta = meta or {}
+        py_type = _type_name_to_py(meta.get("type", "any"))
+        required = bool(meta.get("required", False))
+        default = ... if required and "default" not in meta else meta.get("default", None)
+        dynamic_fields[arg_name] = (py_type, default)
 
     class _MCPArgsBase(BaseModel):
         model_config = ConfigDict(extra="allow")
@@ -215,13 +232,11 @@ def _create_mcp_tool(tool_config: dict) -> Tool:
     )
 
     def sync_wrapper(**tool_kwargs: Any) -> str:
-        """StructuredTool 调用入口，接收多参数 kwargs。"""
         try:
-            kwargs = _build_mcp_kwargs(tool_kwargs, arg_name=arg_name, arg_names=arg_names)
-            # 在同步环境中运行异步逻辑
+            kwargs = _build_mcp_kwargs(tool_kwargs, arg_defs=arg_defs)
             return asyncio.run(_call_remote_mcp(url, remote_tool_name, kwargs))
         except Exception as e:
-            return f"系统错误: {e}"
+            return f"工具参数错误或调用失败: {e}"
 
     return StructuredTool.from_function(
         func=sync_wrapper,

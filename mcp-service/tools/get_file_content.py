@@ -3,7 +3,6 @@ from dataBase.Service import FileService
 
 @register_tool(
     category="file_system",
-    arg_name="file_id",
     description="读取指定文本文件内容。app_id 由运行时注入，无需模型传入。",
 )
 async def read_file_content(file_id: str, app_id: str = "") -> str:

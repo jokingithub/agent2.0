@@ -8,7 +8,6 @@ from core.decorators import register_tool
 
 @register_tool(
     category="user_interaction",
-    arg_name="question",
     description="向用户提问并挂起流程，等待用户输入（HITL）",
 )
 async def ask_human_input(

@@ -164,7 +164,6 @@ class ToolService(BaseConfigService):
         if existed:
             update_data = dict(tool_data)
             update_data.pop("_id", None)
-            # 避免覆盖历史创建时间
             update_data.pop("created_at", None)
             self.update(existed["_id"], update_data)
             return existed["_id"]
@@ -172,6 +171,42 @@ class ToolService(BaseConfigService):
         model = ToolModel(**tool_data)
         return self.create(model)
 
+    # ✅ 新增：删除工具时，自动清理 skill/sub_agent 的引用
+    def delete(self, doc_id: str) -> int:
+        existed = self.get_by_id(doc_id)
+        if not existed:
+            return 0
+
+        # 1) 清理 skills.tool_ids
+        skill_service = SkillService()
+        skills = skill_service.get_all() or []
+        skill_updated = 0
+        for s in skills:
+            tool_ids = s.get("tool_ids") or []
+            if doc_id in tool_ids:
+                new_ids = [x for x in tool_ids if x != doc_id]
+                skill_service.update(s["_id"], {"tool_ids": new_ids})
+                skill_updated += 1
+
+        # 2) 清理 sub_agents.tool_ids（防止子Agent直接挂工具）
+        sub_agent_service = SubAgentService()
+        agents = sub_agent_service.get_all() or []
+        agent_updated = 0
+        for a in agents:
+            tool_ids = a.get("tool_ids") or []
+            if doc_id in tool_ids:
+                new_ids = [x for x in tool_ids if x != doc_id]
+                sub_agent_service.update(a["_id"], {"tool_ids": new_ids})
+                agent_updated += 1
+
+        # 3) 删除 tools 本体
+        count = super().delete(doc_id)
+
+        logger.info(
+            f"删除工具完成: tool_id={doc_id}, "
+            f"skills_updated={skill_updated}, sub_agents_updated={agent_updated}"
+        )
+        return count
 
 class ChatLogService(BaseConfigService):
     collection = "chat_logs"

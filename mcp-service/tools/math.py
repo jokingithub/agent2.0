@@ -1,6 +1,6 @@
 from core.decorators import register_tool
 
-@register_tool(category="math", arg_name="expression")
+@register_tool(category="math")
 def calculate(expression: str) -> str:
     """执行数学运算。"""
     try:

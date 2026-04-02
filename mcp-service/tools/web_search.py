@@ -2,7 +2,7 @@ from core.decorators import register_tool
 from core.utils import fetch_external_api
 import os
 
-@register_tool(category="search", arg_name="keyword", description="调用外部搜索引擎查询实时信息。")
+@register_tool(category="search", description="调用外部搜索引擎查询实时信息。")
 async def web_search_api(keyword: str) -> str:
     """这是一个调用外部 HTTP 接口的示例工具。"""
     # 这里填写实际的 API 地址

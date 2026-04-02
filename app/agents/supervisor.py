@@ -135,7 +135,7 @@ def supervisor_node(state, config: RunnableConfig = None):
     for name, desc in available_subagents.items():
         route_prompt += f"- {name}: {desc}\n"
     route_prompt += "\n务必严格选择：FINISH 或上述 sub_agent 名称之一。"
-
+    route_prompt += "\nReturn strictly in JSON format."
     logger.info(f"Supervisor: scene={scene_id}, role={role_name}, sub_agents={routable_names}")
 
     try:
