@@ -510,20 +510,55 @@ def get_fallback_chain():
 _tool_service = ToolService()
 
 
-def _extract_arg_name_from_schema(input_schema: Any) -> str:
-    """从 MCP input schema 中尽可能提取首个参数名。"""
+def _jsonschema_type_to_type_name(schema: Any) -> str:
+    if not isinstance(schema, dict):
+        return "any"
+
+    t = schema.get("type")
+    if isinstance(t, list):
+        # ["string","null"] 这类
+        t = next((x for x in t if x != "null"), "any")
+
+    if t in ("string", "integer", "number", "boolean", "array", "object"):
+        return t
+
+    # 兼容 anyOf / oneOf
+    for key in ("anyOf", "oneOf"):
+        arr = schema.get(key)
+        if isinstance(arr, list) and arr:
+            for item in arr:
+                tn = _jsonschema_type_to_type_name(item)
+                if tn != "any":
+                    return tn
+    return "any"
+
+
+def _extract_arg_names_from_schema(input_schema: Any) -> Dict[str, Any]:
     if not isinstance(input_schema, dict):
-        return "query"
+        return {}
 
-    props = input_schema.get("properties")
-    if isinstance(props, dict) and props:
-        return str(next(iter(props.keys())))
+    props = input_schema.get("properties") or {}
+    required_set = set(input_schema.get("required") or [])
 
-    required = input_schema.get("required")
-    if isinstance(required, list) and required:
-        return str(required[0])
+    if not isinstance(props, dict):
+        return {}
 
-    return "query"
+    result: Dict[str, Any] = {}
+    for name, meta in props.items():
+        meta = meta or {}
+        field = {
+            "type": _jsonschema_type_to_type_name(meta),
+            "required": name in required_set,
+        }
+        if "default" in meta:
+            field["default"] = meta["default"]
+        if "description" in meta:
+            field["description"] = meta["description"]
+        if "enum" in meta and isinstance(meta["enum"], list):
+            field["enum"] = meta["enum"]
+        result[name] = field
+
+    return result
 
 
 async def _fetch_mcp_tools(url: str) -> List[Dict[str, Any]]:
@@ -576,7 +611,7 @@ async def _fetch_mcp_tools(url: str) -> List[Dict[str, Any]]:
             {
                 "name": str(name),
                 "description": str(description or ""),
-                "arg_name": _extract_arg_name_from_schema(input_schema),
+                "arg_names": _extract_arg_names_from_schema(input_schema),
             }
         )
 
@@ -631,7 +666,7 @@ def sync_tools_from_mcp(data: MCPToolSyncRequest):
             "description": t.get("description", ""),
             "config": {
                 "remote_tool_name": t["name"],
-                "arg_name": t.get("arg_name", "query"),
+                "arg_names": t.get("arg_names", {}),
                 "expose_to_agent": True,
             },
         }
