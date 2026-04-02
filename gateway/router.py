@@ -191,6 +191,29 @@ async def gateway_hitl_resume(
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
+@protected_router.delete("/sessions/{session_id}")
+async def gateway_delete_session(
+    session_id: str,
+    app_id: str = Query(..., min_length=1, description="应用ID"),
+):
+    backend = store.get_backend_base_url()
+    target_url = f"{backend}/sessions/{session_id}"
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.delete(target_url, params={"app_id": app_id})
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail=f"Backend service unreachable: {str(exc)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    content_type = resp.headers.get("content-type", "")
+    if "application/json" in content_type.lower():
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+    return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
+
+
 @protected_router.get("/file_content",response_model=FileInfo)
 async def gateway_file(
     session_id: str = Query(...),
