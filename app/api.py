@@ -731,6 +731,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     }
 
     async def event_gen():
+        token_sent = False
         final_message = ""
 
         async def run_graph():
@@ -766,12 +767,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             me.update(base_meta)
                             # 只有 assistant 类型才更新 final_message
                             if me.get("message_type") == "assistant":
-                                content = me.get("message", "")
-                                if isinstance(content, str) and content.strip():
-                                    final_message = content
-                                # assistant 内容已通过 token 事件逐字推送，不再重复推 node 事件
-                                continue
-                            yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+                              content = me.get("message", "")
+                              if isinstance(content, str) and content.strip():
+                                  final_message = content
+
+                              # 只有真的发过 token，才跳过 assistant node，避免双发
+                              if token_sent:
+                                  continue
+
+                              # 没有 token 的情况下，回退发送 assistant node
+                              yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+                              continue
 
                         # HITL 挂起事件
                         if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
@@ -807,6 +813,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             if token_task in finished:
                 token = token_task.result()
+                token_sent = True
                 token_payload = {
                     "message_type": "token",
                     "delta": token,
@@ -970,12 +977,17 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
                         for me in msg_events:
                             me.update(base_meta)
                             if me.get("message_type") == "assistant":
-                                content = me.get("message", "")
-                                if isinstance(content, str) and content.strip():
-                                    final_message = content
-                                # assistant 内容已通过 token 事件逐字推送，不再重复推 node 事件
-                                continue
-                            yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+                              content = me.get("message", "")
+                              if isinstance(content, str) and content.strip():
+                                  final_message = content
+
+                              # 只有真的发过 token，才跳过 assistant node，避免双发
+                              if token_sent:
+                                  continue
+
+                              # 没有 token 的情况下，回退发送 assistant node
+                              yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
+                              continue
 
                         if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
                             pending = node_value.get("pending_context") or {}
@@ -1010,6 +1022,7 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
 
             if token_task in finished:
                 token = token_task.result()
+                token_sent = True
                 token_payload = {"message_type": "token", "delta": token}
                 yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
                 if not done:
