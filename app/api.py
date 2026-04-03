@@ -285,16 +285,42 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
 
 
 class StreamTokenCallback(AsyncCallbackHandler):
-    """把 LLM token 写入 asyncio.Queue，供 SSE 实时输出。"""
+    """把 LLM token 写入 asyncio.Queue，供 SSE 实时输出。
+
+    关键点：
+    1) 普通节点：原样透传 token
+    2) Supervisor（结构化输出）：从 JSON token 流中提取 answer/final_answer 文本
+    3) 兼容字段演进：answer / final_answer，next / next_action
+    """
+
+    _ANSWER_KEYS = ('"final_answer"', '"answer"')
+    _ROUTE_KEYS = ('"next_action"', '"next"')
 
     def __init__(self, queue: "asyncio.Queue[str]"):
         super().__init__()
         self.queue = queue
-        # 仅屏蔽路由节点的结构化输出 token，避免把 next/answer JSON 透传给前端。
+
+        # 仅屏蔽路由节点的结构化输出 token，避免把 next/next_action 等 JSON 直接透传给前端
         self._blocked_nodes = {"Supervisor"}
+
         self._blocked_run_ids: set[str] = set()
         self._allowed_run_ids: set[str] = set()
+
+        # 每个 run 的解析状态
         self._stream_states: dict[str, dict[str, Any]] = {}
+
+    # ---------------------------
+    # run 跟踪
+    # ---------------------------
+
+    def _stream_key(self, **kwargs) -> str:
+        run_id = kwargs.get("run_id")
+        if run_id is not None:
+            return str(run_id)
+        parent_run_id = kwargs.get("parent_run_id")
+        if parent_run_id is not None:
+            return str(parent_run_id)
+        return "__no_run_id__"
 
     def _track_run(self, **kwargs):
         metadata = kwargs.get("metadata", {}) or {}
@@ -311,35 +337,92 @@ class StreamTokenCallback(AsyncCallbackHandler):
 
         self._allowed_run_ids.add(rid)
 
-    def _stream_key(self, **kwargs) -> str:
-        run_id = kwargs.get("run_id")
-        return str(run_id) if run_id is not None else "__no_run_id__"
+    def _cleanup_run(self, **kwargs):
+        rid = self._stream_key(**kwargs)
+        self._blocked_run_ids.discard(rid)
+        self._allowed_run_ids.discard(rid)
+        self._stream_states.pop(rid, None)
+
+    # ---------------------------
+    # 结构化 token 解析状态机
+    # ---------------------------
 
     def _state_for(self, stream_key: str) -> dict[str, Any]:
         state = self._stream_states.get(stream_key)
         if state is None:
             state = {
-                "mode": "unknown",  # unknown | passthrough | structured | done
+                "mode": "unknown",      # unknown | passthrough | structured | done
                 "sniff": "",
-                "phase": "find_key",  # find_key | find_colon | find_quote | in_answer | done
+
+                # structured 模式状态
+                "phase": "find_key",    # find_key | find_colon | find_quote | in_answer | done
                 "key_window": "",
                 "seen_colon": False,
+
+                # 字符串转义状态
                 "escape": False,
+                "unicode_mode": False,
+                "unicode_buf": "",
             }
             self._stream_states[stream_key] = state
         return state
 
+    def _answer_key_seen(self, key_window: str) -> bool:
+        return any(k in key_window for k in self._ANSWER_KEYS)
+
+    def _route_or_answer_hint_seen(self, sniff: str) -> bool:
+        return any(k in sniff for k in self._ANSWER_KEYS + self._ROUTE_KEYS)
+
     def _append_answer_char(self, ch: str, state: dict[str, Any], out: list[str]):
+        # 处理 \uXXXX
+        if state["unicode_mode"]:
+            if ch.lower() in "0123456789abcdef":
+                state["unicode_buf"] += ch
+                if len(state["unicode_buf"]) == 4:
+                    try:
+                        out.append(chr(int(state["unicode_buf"], 16)))
+                    except Exception:
+                        # 兜底：按原样回写
+                        out.append("\\u" + state["unicode_buf"])
+                    state["unicode_mode"] = False
+                    state["unicode_buf"] = ""
+                    state["escape"] = False
+                return
+            else:
+                # 非法 unicode 序列，兜底回写
+                out.append("\\u" + state["unicode_buf"] + ch)
+                state["unicode_mode"] = False
+                state["unicode_buf"] = ""
+                state["escape"] = False
+                return
+
+        # 处理普通转义
         if state["escape"]:
-            mapping = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "/": "/"}
+            if ch == "u":
+                state["unicode_mode"] = True
+                state["unicode_buf"] = ""
+                return
+
+            mapping = {
+                "n": "\n",
+                "r": "\r",
+                "t": "\t",
+                '"': '"',
+                "\\": "\\",
+                "/": "/",
+                "b": "\b",
+                "f": "\f",
+            }
             out.append(mapping.get(ch, ch))
             state["escape"] = False
             return
 
+        # 进入转义
         if ch == "\\":
             state["escape"] = True
             return
 
+        # 字符串结束
         if ch == '"':
             state["phase"] = "done"
             state["mode"] = "done"
@@ -354,9 +437,10 @@ class StreamTokenCallback(AsyncCallbackHandler):
             phase = state["phase"]
 
             if phase == "find_key":
-                state["key_window"] = (state["key_window"] + ch)[-40:]
-                if '"answer"' in state["key_window"]:
+                state["key_window"] = (state["key_window"] + ch)[-120:]
+                if self._answer_key_seen(state["key_window"]):
                     state["phase"] = "find_colon"
+                    state["seen_colon"] = False
                 continue
 
             if phase == "find_colon":
@@ -372,8 +456,15 @@ class StreamTokenCallback(AsyncCallbackHandler):
                     continue
                 if ch == '"':
                     state["phase"] = "in_answer"
+                    state["escape"] = False
+                    state["unicode_mode"] = False
+                    state["unicode_buf"] = ""
                 elif ch == "n":
-                    # answer 为 null
+                    # null
+                    state["phase"] = "done"
+                    state["mode"] = "done"
+                else:
+                    # 非字符串值（极少见），不解析，直接结束
                     state["phase"] = "done"
                     state["mode"] = "done"
                 continue
@@ -382,6 +473,7 @@ class StreamTokenCallback(AsyncCallbackHandler):
                 self._append_answer_char(ch, state, out)
                 continue
 
+            # done：忽略后续结构字段
             if phase == "done":
                 continue
 
@@ -390,6 +482,7 @@ class StreamTokenCallback(AsyncCallbackHandler):
     def _transform_token(self, token: str, *, force_structured: bool, stream_key: str) -> str:
         state = self._state_for(stream_key)
 
+        # 强制结构化解析（Supervisor）
         if force_structured:
             if state["mode"] in ("unknown", "passthrough"):
                 state["mode"] = "structured"
@@ -402,30 +495,37 @@ class StreamTokenCallback(AsyncCallbackHandler):
         if mode in ("structured", "done"):
             return self._consume_structured_token(state, token)
 
-        # unknown: 先嗅探，识别是否是 Supervisor 的结构化 JSON 流。
+        # unknown：先嗅探是否结构化 JSON
         state["sniff"] += token
         sniff = state["sniff"]
         stripped = sniff.lstrip()
+
         if not stripped:
             return ""
 
+        # 非 JSON 起始：直接透传
         if not stripped.startswith("{"):
             state["mode"] = "passthrough"
             state["sniff"] = ""
             return sniff
 
-        if '"next"' in sniff or '"answer"' in sniff:
+        # JSON 且包含路由/答案字段提示，进入结构化解析
+        if self._route_or_answer_hint_seen(sniff):
             state["mode"] = "structured"
             state["sniff"] = ""
             return self._consume_structured_token(state, sniff)
 
-        # 给结构化输出一点前置缓冲窗口，避免误判。
-        if len(sniff) > 96:
+        # 给结构化输出一点缓冲窗口，避免误判
+        if len(sniff) > 256:
             state["mode"] = "passthrough"
             state["sniff"] = ""
             return sniff
 
         return ""
+
+    # ---------------------------
+    # LangChain 回调
+    # ---------------------------
 
     async def on_chat_model_start(self, serialized, messages, **kwargs):
         self._track_run(**kwargs)
@@ -451,8 +551,10 @@ class StreamTokenCallback(AsyncCallbackHandler):
                 await self.queue.put(token)
                 return
 
+        # run_id 集合未命中时，兜底看节点名
         metadata = kwargs.get("metadata", {}) or {}
         node = metadata.get("langgraph_node", "")
+
         if node in self._blocked_nodes:
             delta = self._transform_token(token, force_structured=True, stream_key=stream_key)
             if delta:
@@ -462,13 +564,6 @@ class StreamTokenCallback(AsyncCallbackHandler):
         delta = self._transform_token(token, force_structured=False, stream_key=stream_key)
         if delta:
             await self.queue.put(delta)
-
-    def _cleanup_run(self, **kwargs):
-        run_id = kwargs.get("run_id")
-        rid = str(run_id) if run_id is not None else "__no_run_id__"
-        self._blocked_run_ids.discard(rid)
-        self._allowed_run_ids.discard(rid)
-        self._stream_states.pop(rid, None)
 
     async def on_llm_end(self, response, **kwargs):
         self._cleanup_run(**kwargs)
