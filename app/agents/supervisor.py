@@ -167,3 +167,10 @@ def supervisor_node(state, config: RunnableConfig = None):
     except Exception as e:
         logger.error(f"Supervisor 决策失败: {e}")
         return {"next": "FINISH", "role_name": role_name}
+
+if mcp/skill/SubAgent/END
+  if mcp
+    TODO 
+  if skill 
+    TODO 
+  
