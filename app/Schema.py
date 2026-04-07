@@ -121,9 +121,9 @@ class UsageCollector(BaseCallbackHandler):
         metadata = kwargs.get("metadata", {}) or {}
         self._current_agent = metadata.get("langgraph_node", "unknown")
 
-        logger.info(
-            f"[TOKEN][START] seq={self._seq} agent={self._current_agent} model={self._current_model}"
-        )
+        # logger.info(
+        #     f"[TOKEN][START] seq={self._seq} agent={self._current_agent} model={self._current_model}"
+        # )
 
     def _extract_cached_tokens(self, usage: dict) -> int:
       if not isinstance(usage, dict):
@@ -263,11 +263,11 @@ class UsageCollector(BaseCallbackHandler):
             "cache_hit": cache_hit,
         })
 
-        logger.info(
-            f"[TOKEN][END] seq={self._seq} agent={self._current_agent} model={self._current_model} "
-            f"prompt={call_prompt} completion={call_completion} total={call_total} "
-            f"cached={call_cached} cache_hit={cache_hit} acc_total={self.total_tokens}"
-        )
+        # logger.info(
+        #     f"[TOKEN][END] seq={self._seq} agent={self._current_agent} model={self._current_model} "
+        #     f"prompt={call_prompt} completion={call_completion} total={call_total} "
+        #     f"cached={call_cached} cache_hit={cache_hit} acc_total={self.total_tokens}"
+        # )
 
 
     def on_llm_error(self, error, **kwargs):

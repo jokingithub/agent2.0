@@ -10,6 +10,7 @@ from app.agents.utils.supervisor_utils import (
     build_completed_tasks_summary,
 )
 from dataBase.ConfigService import RoleService
+import json
 from logger import logger
 
 _role_service = RoleService()
@@ -47,11 +48,12 @@ def supervisor_node(state, config: RunnableConfig = None):
             "next": "FINISH",
             "role_name": role_name,
             "sub_task_instruction": "",
+            "agent_scratchpad": [],
             "messages": [AIMessage(content="当前未配置可用子Agent，请联系管理员。")],
         }
 
-    from app.core.llm import get_model, get_model_by_level_id
     from pydantic import BaseModel, Field
+
     class SupervisorDecision(BaseModel):
         next: str = Field(description="下一步路由：sub_agent名称 或 FINISH")
         instruction: str = Field(default="", description="委派给子Agent的具体任务描述")
@@ -74,18 +76,28 @@ def supervisor_node(state, config: RunnableConfig = None):
 
     try:
         decision = llm_decision.invoke([("system", route_prompt), *messages], config=config)
+        raw_decision = decision.model_dump() if hasattr(decision, "model_dump") else str(decision)
+        logger.info(
+            "RAW_SUPERVISOR_DECISION agent=Supervisor payload=%s",
+            json.dumps(raw_decision, ensure_ascii=False, default=str),
+        )
+
         nxt = (decision.next or "").strip()
+
         if nxt == "FINISH":
             answer = (decision.answer or "").strip()
-            res = {"next": "FINISH", "role_name": role_name, "sub_task_instruction": ""}
+            res = {
+                "next": "FINISH",
+                "role_name": role_name,
+                "sub_task_instruction": "",
+                "agent_scratchpad": [],
+            }
             if answer:
                 res["messages"] = [AIMessage(content=answer)]
             return res
+
         if nxt in available_subagents:
-            instr = (decision.instruction or "").strip()
-            if not instr:
-                instr = f"请处理用户请求（路由到 {nxt}）"
-            logger.info(f"Supervisor: 委派 {nxt}, instruction={instr[:80]}...")
+            instr = (decision.instruction or "").strip() or f"请处理用户请求（路由到 {nxt}）"
             return {
                 "next": "RUN_AGENT",
                 "current_agent": nxt,
@@ -93,9 +105,25 @@ def supervisor_node(state, config: RunnableConfig = None):
                 "role_name": role_name,
                 "available_sub_agents": routable_names,
                 "role_config": role or None,
+                "agent_scratchpad": [],  # 关键：新任务清空私有上下文
+                "user_input_required": False,
+                "suspended_action": "",
+                "pending_context": {},
             }
+
         logger.warning(f"Supervisor 非法next='{nxt}'，兜底FINISH")
-        return {"next": "FINISH", "role_name": role_name, "sub_task_instruction": ""}
+        return {
+            "next": "FINISH",
+            "role_name": role_name,
+            "sub_task_instruction": "",
+            "agent_scratchpad": [],
+        }
+
     except Exception as e:
         logger.error(f"Supervisor 决策失败: {e}")
-        return {"next": "FINISH", "role_name": role_name, "sub_task_instruction": ""}
+        return {
+            "next": "FINISH",
+            "role_name": role_name,
+            "sub_task_instruction": "",
+            "agent_scratchpad": [],
+        }

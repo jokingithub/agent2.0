@@ -75,51 +75,87 @@ async def run_agent(state: AgentState, config: RunnableConfig = None) -> Dict:
     agent, tools = result
     session_files = state.get("session_files") or []
     sub_task_instruction = (state.get("sub_task_instruction") or "").strip()
-    messages = list(state.get("messages", []))
 
-    injected_system_parts = []
-    if session_files and tools:
-        file_list = "\n".join(
-            f"- {f.get('file_name', 'unknown')} (ID: {f.get('file_id', 'unknown')})"
-            for f in session_files
-        )
-        injected_system_parts.append(FILE_LIST_TEMPLATE.format(file_list=file_list))
-    if sub_task_instruction:
-        injected_system_parts.append(SUB_TASK_INJECTION_TEMPLATE.format(instruction=sub_task_instruction))
-    if injected_system_parts:
-        combined = "\n\n".join(injected_system_parts)
-        messages.insert(0, SystemMessage(content=combined))
+    # 只使用私有上下文，不使用全局 messages
+    private_messages = list(state.get("agent_scratchpad") or [])
+    if not private_messages:
+        from langchain_core.messages import HumanMessage
+        injected_parts = []
+        if session_files and tools:
+            file_list = "\n".join(
+                f"- {f.get('file_name', 'unknown')} (ID: {f.get('file_id', 'unknown')})"
+                for f in session_files
+            )
+            injected_parts.append(FILE_LIST_TEMPLATE.format(file_list=file_list))
+        if sub_task_instruction:
+            injected_parts.append(SUB_TASK_INJECTION_TEMPLATE.format(instruction=sub_task_instruction))
 
-    response = await agent.ainvoke({"messages": messages}, config=config)
+        if injected_parts:
+            private_messages.append(SystemMessage(content="\n\n".join(injected_parts)))
+        private_messages.append(HumanMessage(content=sub_task_instruction or "请完成当前任务"))
+
+    response = await agent.ainvoke({"messages": private_messages}, config=config)
+
+    def _dump_ai_message_raw(msg: AIMessage) -> str:
+        data = {
+            "type": "AIMessage",
+            "name": getattr(msg, "name", ""),
+            "content": getattr(msg, "content", ""),
+            "tool_calls": getattr(msg, "tool_calls", None),
+            "additional_kwargs": getattr(msg, "additional_kwargs", {}) or {},
+            "response_metadata": getattr(msg, "response_metadata", {}) or {},
+        }
+        return json.dumps(data, ensure_ascii=False, default=str)
+
+    if isinstance(response, AIMessage):
+        logger.info("RAW_SUBAGENT_OUTPUT agent=%s payload=%s", current_agent, _dump_ai_message_raw(response))
+    else:
+        logger.info("RAW_SUBAGENT_OUTPUT agent=%s payload=%s", current_agent, str(response))
 
     if isinstance(response, AIMessage):
         tool_calls = getattr(response, "tool_calls", None)
         if tool_calls:
             response.name = current_agent
-            return {"messages": [response], "current_agent": current_agent}
-        # 无工具调用的总结，返回特殊标记
-        if response.content:
-            marker_msg = AIMessage(
-                content="",
-                name=current_agent,
-                additional_kwargs={"_marker": "sub_agent_completed_no_summary"}
-            )
-            return {"messages": [marker_msg], "current_agent": current_agent}
+            new_pad = private_messages + [response]
+            return {
+                "messages": [response],              # 全局保留审计
+                "agent_scratchpad": new_pad,         # 私有上下文继续
+                "current_agent": current_agent,
+            }
 
-    if isinstance(response, AIMessage) and not response.name:
-        response.name = current_agent
-    return {"messages": [response], "current_agent": current_agent}
+        raw_content = response.content if isinstance(response.content, str) else str(response.content or "")
+        marker_msg = AIMessage(
+            content="",
+            name=current_agent,
+            additional_kwargs={
+                "_marker": "sub_agent_completed_no_summary",
+                "_raw_content": raw_content,
+                "_raw_response_metadata": getattr(response, "response_metadata", {}) or {},
+            },
+        )
+        return {
+            "messages": [marker_msg],
+            "agent_scratchpad": [],                 # 子任务完成，清空私有上下文
+            "current_agent": current_agent,
+        }
+
+    return {
+        "messages": [response],
+        "agent_scratchpad": [],
+        "current_agent": current_agent,
+    }
 
 
 async def run_tools(state: AgentState, config: RunnableConfig) -> Dict:
-    messages = state.get("messages", [])
-    if not messages:
-        return {"current_agent": state.get("current_agent", "")}
+    current_agent = (state.get("current_agent") or "").strip()
+    scratchpad = list(state.get("agent_scratchpad") or [])
+    if not scratchpad:
+        return {"current_agent": current_agent, "agent_scratchpad": scratchpad}
 
-    last = messages[-1]
+    last = scratchpad[-1]
     tool_calls = getattr(last, "tool_calls", None) if isinstance(last, AIMessage) else None
     if not tool_calls:
-        return {"current_agent": state.get("current_agent", "")}
+        return {"current_agent": current_agent, "agent_scratchpad": scratchpad}
 
     runtime_app_id = (state.get("app_id") or "").strip()
     if runtime_app_id:
@@ -131,74 +167,76 @@ async def run_tools(state: AgentState, config: RunnableConfig) -> Dict:
             elif "arguments" in tc:
                 tc["arguments"] = _inject_runtime_app_id(tc.get("arguments"), runtime_app_id)
 
-    current_agent = (state.get("current_agent") or "").strip()
     sa = _find_sub_agent_by_name(current_agent) if current_agent else None
     sa_id = sa.get("_id") if sa else None
     if not sa_id:
         err_msgs = []
         for i, tc in enumerate(tool_calls):
-            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-            if not tcid:
-                tcid = f"toolcall_{i}"
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None) or f"toolcall_{i}"
             err_msgs.append(
                 ToolMessage(
                     content=f"工具执行失败：未找到 current_agent='{current_agent}' 对应 sub_agent 配置",
                     tool_call_id=tcid,
                 )
             )
-        return {"messages": err_msgs, "current_agent": current_agent}
+        return {"messages": err_msgs, "current_agent": current_agent, "agent_scratchpad": scratchpad + err_msgs}
 
     tools = load_tools_for_sub_agent(sa_id) or []
     if not tools:
         err_msgs = []
         for i, tc in enumerate(tool_calls):
-            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-            if not tcid:
-                tcid = f"toolcall_{i}"
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None) or f"toolcall_{i}"
             err_msgs.append(
                 ToolMessage(
                     content=f"工具执行失败：agent '{current_agent}' 当前无可用工具",
                     tool_call_id=tcid,
                 )
             )
-        return {"messages": err_msgs, "current_agent": current_agent}
+        return {"messages": err_msgs, "current_agent": current_agent, "agent_scratchpad": scratchpad + err_msgs}
 
     node = ToolNode(tools)
-    result = await node.ainvoke(state, config=config)
+    result = await node.ainvoke({"messages": scratchpad}, config=config)
 
-    # HITL 处理
-    if isinstance(result, dict):
-        out_messages = result.get("messages") or []
-        for msg in out_messages:
-            if not isinstance(msg, ToolMessage):
-                continue
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            if not content.startswith("__HITL__"):
-                continue
+    out_messages = result.get("messages") if isinstance(result, dict) else (result or [])
+    out_messages = out_messages or []
+    logger.info(
+        "RAW_TOOL_OUTPUT agent=%s payload=%s",
+        current_agent,
+        json.dumps({"messages": [str(m) for m in out_messages]}, ensure_ascii=False, default=str),
+    )
 
-            try:
-                payload_str = content[len("__HITL__"):].strip()
-                payload = json.loads(payload_str) if payload_str else {}
-            except Exception:
-                payload = {}
+    new_pad = scratchpad + out_messages
+    ret: Dict[str, Any] = {
+        "messages": out_messages,          # 全局审计
+        "agent_scratchpad": new_pad,       # 私有上下文继续
+        "current_agent": current_agent,
+    }
 
-            result["user_input_required"] = True
-            result["suspended_action"] = "hitl_user_input"
-            result["pending_context"] = {
-                "interaction_id": payload.get("interaction_id", ""),
-                "question": payload.get("question", ""),
-                "input_type": payload.get("input_type", "text"),
-                "timeout_seconds": int(payload.get("timeout_seconds", 300) or 300),
-                "expected_input": payload.get("expected_input") or [],
-                "expected_schema": payload.get("expected_schema") or {},
-                "tool_call_id": getattr(msg, "tool_call_id", "") or "",
-                "current_agent": current_agent,
-                "scene_id": state.get("scene_id", ""),
-                "selected_role_id": state.get("selected_role_id", ""),
-            }
-            break
+    for msg in out_messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if not content.startswith("__HITL__"):
+            continue
+        try:
+            payload = json.loads(content[len("__HITL__"):].strip() or "{}")
+        except Exception:
+            payload = {}
 
-    if isinstance(result, dict):
-        result["current_agent"] = current_agent
-        return result
-    return {"messages": result, "current_agent": current_agent}
+        ret["user_input_required"] = True
+        ret["suspended_action"] = "hitl_user_input"
+        ret["pending_context"] = {
+            "interaction_id": payload.get("interaction_id", ""),
+            "question": payload.get("question", ""),
+            "input_type": payload.get("input_type", "text"),
+            "timeout_seconds": int(payload.get("timeout_seconds", 300) or 300),
+            "expected_input": payload.get("expected_input") or [],
+            "expected_schema": payload.get("expected_schema") or {},
+            "tool_call_id": getattr(msg, "tool_call_id", "") or "",
+            "current_agent": current_agent,
+            "scene_id": state.get("scene_id", ""),
+            "selected_role_id": state.get("selected_role_id", ""),
+        }
+        break
+
+    return ret

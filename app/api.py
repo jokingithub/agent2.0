@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import warnings
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from langchain_core.callbacks import AsyncCallbackHandler
 
 from app.agents.utils.graph_builder import create_graph
@@ -26,7 +27,9 @@ from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
 from fastapi.middleware.cors import CORSMiddleware
 from app.file_api import router as file_router
-
+warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic\.main")
+warnings.filterwarnings("ignore", category=UserWarning, message=r".*Pydantic serializer warnings.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=r".*PydanticSerializationUnexpectedValue.*")
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -36,13 +39,20 @@ except Exception:
 _docs_url = "/docs" if Config.ENABLE_API_DOCS else None
 _redoc_url = "/redoc" if Config.ENABLE_API_DOCS else None
 _openapi_url = "/openapi.json" if Config.ENABLE_API_DOCS else None
-
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
+)
 app = FastAPI(
     title="AI2.0 API",
     version="1.0.0",
     docs_url=_docs_url,
     redoc_url=_redoc_url,
     openapi_url=_openapi_url,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
 )
 app.include_router(config_router)
 app.include_router(session_router)
@@ -271,6 +281,83 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
         events.append(event)
 
     return events
+
+def _to_loggable(obj: Any) -> Any:
+    """尽量把任意对象转成可 JSON 序列化结构，失败再退回字符串。"""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, dict):
+        return {str(k): _to_loggable(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_loggable(x) for x in obj]
+
+    # LangChain 消息对象：尽量保留关键信息
+    if isinstance(obj, BaseMessage):
+        data = {
+            "type": obj.__class__.__name__,
+            "content": getattr(obj, "content", ""),
+            "name": getattr(obj, "name", ""),
+            "additional_kwargs": getattr(obj, "additional_kwargs", {}) or {},
+            "response_metadata":
+             getattr(obj, "response_metadata", {}) or {},
+        }
+        ak = data.get("additional_kwargs") or {}
+        if not data.get("content") and isinstance(ak, dict) and ak.get("_raw_content"):
+            data["raw_content"] = ak.get("_raw_content")
+        tool_calls = getattr(obj, "tool_calls", None)
+        if tool_calls is not None:
+            data["tool_calls"] = _to_loggable(tool_calls)
+        tool_call_id = getattr(obj, "tool_call_id", None)
+        if tool_call_id:
+            data["tool_call_id"] = tool_call_id
+        return data
+
+    # Pydantic v2
+    if hasattr(obj, "model_dump"):
+        try:
+            return _to_loggable(obj.model_dump())
+        except Exception:
+            pass
+
+    # 兜底
+    return str(obj)
+
+
+def _pick_agent_name(node_name: str, node_value: Any) -> str:
+    """尽量从 node 输出中推断 agent 名称。"""
+    if isinstance(node_value, dict):
+        # 优先当前子 agent
+        current_agent = node_value.get("current_agent")
+        if current_agent:
+            return str(current_agent)
+
+        # supervisor 的 role 名
+        role_name = node_value.get("role_name")
+        if role_name:
+            return f"Supervisor({role_name})"
+
+        # 从 messages 里找 name
+        msgs = node_value.get("messages") or []
+        if msgs and isinstance(msgs, list):
+            for m in msgs:
+                name = getattr(m, "name", "")
+                if name:
+                    return str(name)
+
+    return node_name
+
+
+def _log_raw_node_output(endpoint: str, session_id: str, node_name: str, node_value: Any):
+    """把每个 node 返回值原样打印到后台日志。"""
+    agent_name = _pick_agent_name(node_name, node_value)
+    payload = _to_loggable(node_value)
+    payload_text = json.dumps(payload, ensure_ascii=False, default=str)
+    logger.info(
+        f"[RAW][NODE] endpoint={endpoint} session={session_id} node={node_name} agent={agent_name} payload={payload_text}"
+    )
+
 
 
 class StreamTokenCallback(AsyncCallbackHandler):
@@ -605,6 +692,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         },
     ):
         for node_name, node_value in output.items():
+            #_log_raw_node_output("/chat", req.session_id, node_name, node_value)
             # ---- 节点级元信息 ----
             base_meta: dict[str, Any] = {}
             if isinstance(node_value, dict):
@@ -652,13 +740,13 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 event = {"node": node_name, **base_meta}
                 events.append(event)
 
-    _print_request_token_summary(
-        endpoint="/chat",
-        session_id=req.session_id,
-        app_id=app_id,
-        scene_id=req.scene_id or "default",
-        collector=collector,
-    )
+    # _print_request_token_summary(
+    #     endpoint="/chat",
+    #     session_id=req.session_id,
+    #     app_id=app_id,
+    #     scene_id=req.scene_id or "default",
+    #     collector=collector,
+    # )
 
     asyncio.create_task(_save_chat_log(
         app_id=app_id,
@@ -732,6 +820,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 },
             ):
                 for node_name, node_value in output.items():
+                    #_log_raw_node_output("/chat/stream", req.session_id, node_name, node_value)
                     # ---- 节点级元信息 ----
                     base_meta: dict[str, Any] = {}
                     if isinstance(node_value, dict):
@@ -828,13 +917,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         token_task = None
                     break
 
-        _print_request_token_summary(
-            endpoint="/chat/stream",
-            session_id=req.session_id,
-            app_id=app_id,
-            scene_id=req.scene_id or "default",
-            collector=collector,
-        )
+        # _print_request_token_summary(
+        #     endpoint="/chat/stream",
+        #     session_id=req.session_id,
+        #     app_id=app_id,
+        #     scene_id=req.scene_id or "default",
+        #     collector=collector,
+        # )
 
         asyncio.create_task(_save_chat_log(
             app_id=app_id,
@@ -938,6 +1027,7 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
                 },
             ):
                 for node_name, node_value in output.items():
+                    #_log_raw_node_output("/sessions/{session_id}/hitl/resume", session_id, node_name, node_value)
                     base_meta: dict[str, Any] = {}
                     if isinstance(node_value, dict):
                         if node_name == "Supervisor":
@@ -1026,13 +1116,13 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
         resumed_input = req.user_input
         resumed_input_text = json.dumps(resumed_input, ensure_ascii=False) if isinstance(resumed_input, (dict, list)) else str(resumed_input)
 
-        _print_request_token_summary(
-            endpoint="/sessions/{session_id}/hitl/resume",
-            session_id=session_id,
-            app_id=req.app_id,
-            scene_id="default",
-            collector=collector,
-        )
+        # _print_request_token_summary(
+        #     endpoint="/sessions/{session_id}/hitl/resume",
+        #     session_id=session_id,
+        #     app_id=req.app_id,
+        #     scene_id="default",
+        #     collector=collector,
+        # )
 
         asyncio.create_task(_save_chat_log(
             app_id=req.app_id,

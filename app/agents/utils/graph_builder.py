@@ -55,6 +55,7 @@ def suspend_handler(state: AgentState):
             context={
                 "session_files": state.get("session_files") or [],
                 "messages": [],
+                "agent_scratchpad": [],  # 如需完整恢复，可后续做消息序列化再存
                 "tool_call_id": pending.get("tool_call_id", ""),
                 "current_agent": pending.get("current_agent", "") or state.get("current_agent", ""),
                 "scene_id": pending.get("scene_id", "") or state.get("scene_id", ""),
