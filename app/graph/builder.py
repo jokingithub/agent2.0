@@ -11,11 +11,14 @@ from logger import logger
 from dataBase.Service import SessionService
 
 
+_MAX_SUPERVISOR_LOOPS = 8  # 防止无限循环的安全阀
+
+
 def _route_from_supervisor(state: AgentState) -> str:
     """
     兼容路由：
     - 标准: next=RUN_AGENT/FINISH
-    - 兼容旧: next=某个agent名=> 当作 RUN_AGENT
+    - 兼容旧: next=某个agent名 => 当作 RUN_AGENT
     """
     nxt = (state.get("next") or "").strip()
     if nxt in ("RUN_AGENT", "FINISH"):
@@ -24,6 +27,22 @@ def _route_from_supervisor(state: AgentState) -> str:
         logger.warning(f"Supervisor next 非标准值 '{nxt}'，按 RUN_AGENT 兼容处理")
         return "RUN_AGENT"
     return "FINISH"
+
+
+def _route_after_agent(state: AgentState) -> str:
+    """GenericAgentRunner 后路由：
+    - 有 tool_calls → TOOL（进工具执行循环）
+    - 无 tool_calls → BACK_TO_SUPERVISOR（回 Supervisor 判断下一步）
+    """
+    messages = state.get("messages", [])
+    if not messages:
+        return "BACK_TO_SUPERVISOR"
+
+    from langchain_core.messages import AIMessage
+    last = messages[-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "TOOL"
+    return "BACK_TO_SUPERVISOR"
 
 
 def _route_after_tool_runner(state: AgentState) -> str:
@@ -75,6 +94,7 @@ def create_graph():
     workflow.add_node("GenericToolRunner", generic_tool_runner)
     workflow.add_node("SuspendHandler", _suspend_handler)
 
+    # Supervisor → RUN_AGENT(委派子Agent) / FINISH(结束)
     workflow.add_conditional_edges(
         "Supervisor",
         _route_from_supervisor,
@@ -84,15 +104,17 @@ def create_graph():
         },
     )
 
+    # GenericAgentRunner → TOOL(有工具调用) / BACK_TO_SUPERVISOR(任务完成，回Supervisor)
     workflow.add_conditional_edges(
         "GenericAgentRunner",
-        route_after_generic_agent,
+        _route_after_agent,
         {
             "TOOL": "GenericToolRunner",
-            "DONE": END,
+            "BACK_TO_SUPERVISOR": "Supervisor",  # ← 核心改动：回 Supervisor 而不是 END
         },
     )
 
+    # GenericToolRunner → SUSPEND(HITL挂起) / CONTINUE(回Agent继续)
     workflow.add_conditional_edges(
         "GenericToolRunner",
         _route_after_tool_runner,
@@ -101,8 +123,9 @@ def create_graph():
             "CONTINUE": "GenericAgentRunner",
         },
     )
+
     workflow.add_edge("SuspendHandler", END)
     workflow.set_entry_point("Supervisor")
     compiled = workflow.compile()
-    logger.info("graph: 编译完成（固定节点模式）")
+    logger.info("graph: 编译完成（Supervisor循环模式）")
     return compiled

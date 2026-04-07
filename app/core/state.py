@@ -15,9 +15,12 @@ class AgentState(TypedDict):
     # 当前要执行的 sub_agent 名称（运行时动态）
     current_agent: Optional[str]
 
+    # Supervisor 拆解后的子任务指令，注入给 SubAgent
+    sub_task_instruction: Optional[str]
+
     # 当前生效角色名（给前端展示）
     role_name: Optional[str]
-    selected_role_id: Optional[str]  # ← 新增：前端指定的 role
+    selected_role_id: Optional[str]
 
     session_id: str
     app_id: str

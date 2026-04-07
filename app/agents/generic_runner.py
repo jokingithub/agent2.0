@@ -3,7 +3,7 @@
 
 import json
 from typing import Optional, Dict, Any, List
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.prebuilt import ToolNode
 
@@ -11,6 +11,7 @@ from dataBase.ConfigService import SubAgentService
 from app.agents.generic import create_agent_from_config
 from app.tools.factory import load_tools_for_sub_agent
 from app.core.state import AgentState
+from app.prompts.sub_agent import SUB_TASK_INJECTION_TEMPLATE, FILE_LIST_TEMPLATE
 from logger import logger
 
 _sub_agent_service = SubAgentService()
@@ -27,16 +28,11 @@ def _inject_runtime_app_id(args: Any, app_id: str) -> Any:
         return args
 
     if isinstance(args, dict):
-        # 1) 嵌套 data 注入（兼容 arg_name=data 的工具）
         data = args.get("data")
         if isinstance(data, dict):
-            # 强制以运行时 app_id 为准
             data["app_id"] = app_id
-            # data 嵌套存在时，不额外注入顶层 app_id，避免下游 schema 校验报多余字段
             args.pop("app_id", None)
             return args
-
-        # 2) 非 data 嵌套场景：顶层强制覆盖注入
         args["app_id"] = app_id
         return args
 
@@ -73,16 +69,15 @@ def _find_sub_agent_by_name(name: str) -> Optional[Dict[str, Any]]:
 
 
 def route_after_generic_agent(state: AgentState) -> str:
-    """GenericAgentRunner 后路由：有 tool_calls -> TOOL，否则 DONE"""
+    """GenericAgentRunner 后路由：有 tool_calls -> TOOL，否则回 Supervisor"""
     messages = state.get("messages", [])
     if not messages:
-        return "DONE"
+        return "BACK_TO_SUPERVISOR"
 
     last = messages[-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "TOOL"
-    return "DONE"
-
+    return "BACK_TO_SUPERVISOR"
 
 async def generic_agent_runner(state: AgentState, config: RunnableConfig = None):
     current_agent = (state.get("current_agent") or "").strip()
@@ -119,14 +114,77 @@ async def generic_agent_runner(state: AgentState, config: RunnableConfig = None)
 
     agent, tools = result
     session_files = state.get("session_files") or []
-    messages = list(state.get("messages", []))
+    sub_task_instruction = (state.get("sub_task_instruction") or "").strip()
+
+    # ---- 关键改动：构造"干净的" messages ----
+    # 不直接用 state.messages，而是只包含子任务指令和必要的上下文
+    messages = []
+
+    # 1) 注入系统消息（子任务指令 + 文件列表）
+    injected_system_parts = []
+
+    # 文件列表
     if session_files and tools:
         file_list = "\n".join(
             [f"- {f.get('file_name', 'unknown')} (ID: {f.get('file_id', 'unknown')})" for f in session_files]
         )
-        messages.insert(0, SystemMessage(content=f"当前会话关联的文件:\n{file_list}"))
+        injected_system_parts.append(FILE_LIST_TEMPLATE.format(file_list=file_list))
+
+    # 子任务指令（核心）
+    if sub_task_instruction:
+        injected_system_parts.append(
+            SUB_TASK_INJECTION_TEMPLATE.format(instruction=sub_task_instruction)
+        )
+
+    if injected_system_parts:
+        combined = "\n\n".join(injected_system_parts)
+        messages.append(SystemMessage(content=combined))
+
+    # 2) 只添加子任务指令作为用户消息，不添加原始用户输入
+    # SubAgent 看到的是"任务指令"而非"原始用户请求"
+    messages.append(HumanMessage(content=sub_task_instruction))
+
+    # 3) 可选：如果需要保留部分对话历史（如之前的工具调用结果），
+    #    可以从 state.messages 中筛选出 ToolMessage，但不包含原始 HumanMessage
+    original_messages = state.get("messages", [])
+    for msg in original_messages:
+        # 只保留工具返回结果和之前的 Agent 回复，不保留原始用户输入
+        if isinstance(msg, ToolMessage):
+            messages.append(msg)
+        elif isinstance(msg, AIMessage) and getattr(msg, "name", None):
+            # 保留之前其他 SubAgent 的执行结果
+            messages.append(msg)
+
+    logger.info(
+        f"GenericAgentRunner: agent={current_agent}, "
+        f"instruction='{sub_task_instruction[:60]}...', "
+        f"messages_count={len(messages)}"
+    )
 
     response = await agent.ainvoke({"messages": messages}, config=config)
+
+    # ---- 过滤 SubAgent 的总结性回复 ----
+    if isinstance(response, AIMessage):
+        tool_calls = getattr(response, "tool_calls", None)
+
+        # 情况1：有工具调用 → 正常返回
+        if tool_calls:
+            response.name = current_agent
+            return {"messages": [response], "current_agent": current_agent}
+
+        # 情况2：无工具调用，但有文本内容 → 这是 SubAgent 的总结
+        # 返回空标记消息，不展示总结
+        if response.content:
+            marker_msg = AIMessage(
+                content="",
+                name=current_agent,
+                additional_kwargs={"_marker": "sub_agent_completed_no_summary"}
+            )
+            return {"messages": [marker_msg], "current_agent": current_agent}
+
+    # 默认返回
+    if isinstance(response, AIMessage) and not response.name:
+        response.name = current_agent
     return {"messages": [response], "current_agent": current_agent}
 
 
@@ -186,7 +244,7 @@ async def generic_tool_runner(state: AgentState, config: RunnableConfig):
     node = ToolNode(tools)
     result = await node.ainvoke(state, config=config)
 
-    # HITL 协议识别：工具返回以 __HITL__ 开头的 JSON 字符串
+    # HITL 协议识别
     if isinstance(result, dict):
         out_messages = result.get("messages") or []
         for msg in out_messages:
@@ -202,7 +260,6 @@ async def generic_tool_runner(state: AgentState, config: RunnableConfig):
             except Exception:
                 payload = {}
 
-            # 兼容兜底字段
             interaction_id = payload.get("interaction_id", "")
             question = payload.get("question", "")
             input_type = payload.get("input_type", "text")
