@@ -3,7 +3,7 @@ from core.utils import fetch_external_api
 import os
 import asyncio
 
-@register_tool(category="company_info", arg_name="name", description="获取公司信息")
+@register_tool(category="company_info", description="获取公司信息")
 async def company_info(name: str) -> str:
     """调用公司爬虫数据。"""
     server_location = "http://120.25.254.115:19000"

@@ -50,3 +50,4 @@ logs/
 
 uploads/
 uploadFiles/
+ocr_cache.db
