@@ -9,6 +9,32 @@
 - ⚡ 使用PaddleOCR引擎，识别率高
 - 🌐 提供RESTful API接口
 - 📚 自动生成的API文档（Swagger UI）
+- 💾 内置 SQLite 缓存，支持可配置过期时间（TTL）
+
+## SQLite 缓存配置（可选）
+
+服务默认开启 OCR 结果缓存，使用 SQLite 存储，并按 TTL 自动过期。
+
+可通过环境变量配置：
+
+- `OCR_CACHE_ENABLED`：是否开启缓存，默认 `true`
+- `OCR_CACHE_DB_PATH`：SQLite 文件路径，默认 `项目目录/cache/ocr_cache.db`
+- `OCR_CACHE_TTL_SECONDS`：缓存过期秒数，默认 `3600`
+
+示例：
+
+```bash
+export OCR_CACHE_ENABLED=true
+export OCR_CACHE_DB_PATH=./cache/ocr_cache.db
+export OCR_CACHE_TTL_SECONDS=1800
+python main.py
+```
+
+说明：
+
+- `/ocr/process`：基于 `model` + 文件 MD5 + `batch_size` 生成缓存键
+- `/ocr/file`：基于 `model` + 文件 MD5 + `batch_size` 生成缓存键
+- 上传接口响应中新增 `cached` 字段，表示是否命中缓存
 
 ## 环境设置
 

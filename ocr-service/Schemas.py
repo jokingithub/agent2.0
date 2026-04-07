@@ -4,6 +4,7 @@ from typing import List, Optional, Any
 class OCRRequest(BaseModel):
     file_path: str
     batch_size: int = 4
+    model: str = "PP_OCRv5"
 
 class OCRResponse(BaseModel):
     success: bool

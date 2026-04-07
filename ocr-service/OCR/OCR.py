@@ -21,32 +21,32 @@ DEFAULT_DPI = 100
 SUPPORTED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
 
 # --- 全局变量（仅在子进程中生效） ---
-_ocr_instance = None
+_ocr_instances = {}
 
 def get_ocr_instance(mode: str = "PP_OCRv5"):
     """子进程内单例模式获取 OCR 实例"""
-    global _ocr_instance
-    if _ocr_instance is None:
+    global _ocr_instances
+    if mode not in _ocr_instances:
         try:
             # 延迟加载，防止主进程初始化导致的显存占用或多进程冲突
             from OCR.paddle_OCR import paddle_OCR 
-            _ocr_instance = paddle_OCR(mode=mode)
-            logger.info(f"🚀 [PID {os.getpid()}] OCR Model Loaded.")
+            _ocr_instances[mode] = paddle_OCR(mode=mode)
+            logger.info(f"🚀 [PID {os.getpid()}] OCR Model Loaded: {mode}")
         except ImportError:
             logger.error("❌ 无法导入 paddle_OCR 模块")
             raise
-    return _ocr_instance
+    return _ocr_instances[mode]
 
 def is_image(file_path: str) -> bool:
     return os.path.splitext(file_path)[1].lower() in SUPPORTED_IMAGE_EXTS
 
 def process_batch_mp(args: Tuple[List[Any], List[Image.Image], str]) -> Optional[List[dict]]:
     """子进程执行的任务"""
-    batch_labels, images_pil, _ = args
+    batch_labels, images_pil, model = args
     page_start = time.time()
     
     # 这一步非常关键：如果模型没加载则加载，加载了则直接返回
-    ocr = get_ocr_instance()
+    ocr = get_ocr_instance(mode=model)
     
     try:
         imgs_bgr = []
@@ -71,21 +71,21 @@ def process_batch_mp(args: Tuple[List[Any], List[Image.Image], str]) -> Optional
         logger.error(f"❌ Error in batch {batch_labels}: {str(e)}", exc_info=True)
         return None
 
-def get_batch_generator(input_path: str, batch_size: int):
+def get_batch_generator(input_path: str, batch_size: int, model: str = "PP_OCRv5"):
     """根据路径类型返回对应的生成器"""
     if os.path.isdir(input_path):
         all_files = [os.path.join(input_path, f) for f in os.listdir(input_path)]
         image_files = sorted([f for f in all_files if is_image(f)])
-        return image_batch_generator(image_files, batch_size) if image_files else None
+        return image_batch_generator(image_files, batch_size, model) if image_files else None
     
     elif os.path.isfile(input_path):
         if input_path.lower().endswith(".pdf"):
-            return pdf_batch_generator(input_path, batch_size)
+            return pdf_batch_generator(input_path, batch_size, model)
         elif is_image(input_path):
-            return image_batch_generator([input_path], batch_size)
+            return image_batch_generator([input_path], batch_size, model)
     return None
 
-def pdf_batch_generator(file_path: str, batch_size: int) -> Generator:
+def pdf_batch_generator(file_path: str, batch_size: int, model: str = "PP_OCRv5") -> Generator:
     try:
         info = pdfinfo_from_path(file_path)
         total_pages = info["Pages"]
@@ -93,11 +93,11 @@ def pdf_batch_generator(file_path: str, batch_size: int) -> Generator:
             first_page, last_page = i, min(i + batch_size - 1, total_pages)
             images = convert_from_path(file_path, dpi=DEFAULT_DPI, first_page=first_page, last_page=last_page)
             labels = [j for j in range(first_page, last_page + 1)]
-            yield (labels, images, None)
+            yield (labels, images, model)
     except Exception as e:
         logger.error(f"Failed to process PDF {file_path}: {e}")
 
-def image_batch_generator(file_list: List[str], batch_size: int) -> Generator:
+def image_batch_generator(file_list: List[str], batch_size: int, model: str = "PP_OCRv5") -> Generator:
     for i in range(0, len(file_list), batch_size):
         batch_files = file_list[i : i + batch_size]
         images, labels = [], []
@@ -116,11 +116,16 @@ def image_batch_generator(file_list: List[str], batch_size: int) -> Generator:
             except Exception as e:
                 logger.warning(f"Skipping broken image {f}: {e}")
         if images:
-            yield (labels, images, None)
+            yield (labels, images, model)
 
-def ocr_pipeline_with_executor(input_path: str, executor: ProcessPoolExecutor, batch_size: int = 4) -> List[dict]:
+def ocr_pipeline_with_executor(
+    input_path: str,
+    executor: ProcessPoolExecutor,
+    batch_size: int = 4,
+    model: str = "PP_OCRv5",
+) -> List[dict]:
     """核心流水线：使用传入的进程池执行"""
-    batch_gen = get_batch_generator(input_path, batch_size)
+    batch_gen = get_batch_generator(input_path, batch_size, model)
     if not batch_gen:
         return []
 
