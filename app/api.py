@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.callbacks import AsyncCallbackHandler
 
-from app.graph.builder import create_graph
+from app.agents.utils.graph_builder import create_graph
 from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
 from app.Schema import ResumeHITLRequest
 from fileUpload.fileUpload import save_file
