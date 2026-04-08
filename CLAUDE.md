@@ -1,4 +1,4 @@
-# CLAUDE.md — Agent 2.0 项目规范——已过时正在进行项目重构
+# CLAUDE.md — Agent 2.0 项目规范
 
 ---
 
