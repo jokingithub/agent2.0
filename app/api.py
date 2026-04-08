@@ -16,8 +16,8 @@ from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from langchain_core.callbacks import AsyncCallbackHandler
 
 from app.agents.utils.graph_builder import create_graph
-from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
-from app.Schema import ResumeHITLRequest
+from Schema import ChatRequest, ChatResponse, UploadResponse, ResumeHITLRequest
+from app.core.callbacks import UsageCollector
 from fileUpload.fileUpload import save_file
 from logger import logger
 from config import Config

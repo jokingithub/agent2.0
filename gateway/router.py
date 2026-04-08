@@ -5,7 +5,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, Query
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
-from app.Schema import ChatRequest
+from Schema.request import ChatRequest
 from gateway.auth import require_token
 from gateway.schemas import (
     ToolInvokeRequest,

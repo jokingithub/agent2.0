@@ -14,7 +14,7 @@ from dataBase.ConfigService import (
     FileProcessingService, SceneService, ElementExtractionModelConfigService,
     PromptService,   # 新增
 )
-from dataBase.Schema import (
+from Schema import (
     ModelConnectionModel, ModelLevelModel,
     GatewayEnvModel, GatewayAppModel, GatewayChannelModel,
     ToolModel, ChatLogModel,
@@ -22,7 +22,7 @@ from dataBase.Schema import (
     FileProcessingModel, SceneModel,
     PromptModel,   # 新增
 )
-from app.Schema import (
+from Schema import (
     GatewayAppCreateRequest,ModelConnectionCreateRequest,ModelConnectionUpdateRequest,
     MCPToolSyncRequest,
     WhitelistReplaceRequest,
