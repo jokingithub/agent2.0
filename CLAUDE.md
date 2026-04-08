@@ -88,6 +88,15 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 - 文件存储路径支持临时目录和持久化目录（默认 `/tmp`，可通过 `FILE_STORAGE_ROOT` 配置持久化路径）。
 - 文件信息存入 `files` 表，附带完整内容和元数据。
 
+### config 表保留键
+
+| id | 用途 | 依赖模块 | 缺失后果 | 是否硬依赖 |
+|---|---|---|---|---|
+| element_extraction_model | 要素抽取模型配置（data.model_id） | fileUpload/element_extraction.py | 抽取流程被跳过，字段结果为空 | 是 |
+| global_file_types | 全局文件类型列表（历史配置） | dataBase/Service.py(FileTypeService) | 主要影响旧接口/管理侧，当前分类主流程不阻断 | 否（当前） |
+
+> 说明：当前文件分类主流程使用 file_processing 表作为类型来源；`global_file_types` 非主链路硬依赖。
+
 ---
 
 ## 三、开发规范
@@ -215,7 +224,52 @@ docker-compose up
 
 ---
 
-## 七、开发及调试建议
+## 七、Docker 部署说明
+
+### 7.1 容器清单
+
+| 容器名         | 端口映射       | 描述                          |
+|----------------|---------------|-------------------------------|
+| ai2-pgsql      | 5432:5432     | 主业务数据库（pgvector/pg16）  |
+| langfuse-db    | —             | Langfuse 专用数据库（内部）    |
+| langfuse       | 3301:3000     | LLM 可观测平台                |
+| ai2-gateway    | 9000:9000     | 网关服务                      |
+| main-app       | 8000:8000     | 主应用服务（--reload 热重载）  |
+| mcp-service    | 9001:9001     | MCP 工具服务                  |
+| ocr-service    | 8001:8001     | OCR 微服务（默认注释禁用）     |
+
+### 7.2 服务间网络说明
+
+- 所有服务在同一 Docker 网络内，互相通过**容器名**访问：
+  - 主应用访问数据库：`pgsql:5432`
+  - 网关访问主应用：`http://main-app:8000`
+  - 主应用访问 Langfuse：`http://langfuse:3000`
+  - 主应用访问 MCP 服务：`http://mcp-service:9001`
+- OCR 服务默认注释禁用，启用时取消 `docker-compose.yml` 中对应注释，主应用通过 `OCR_SERVICE_URL` 环境变量寻址。
+
+### 7.3 数据持久化
+
+| 卷名              | 挂载路径                        | 描述               |
+|-------------------|---------------------------------|--------------------|
+| ai2_pg_data       | /var/lib/postgresql/data        | 主数据库数据       |
+| langfuse_db_data  | /var/lib/postgresql/data        | Langfuse 数据库    |
+| ./sessions        | /app/sessions                   | 会话文件           |
+| ./uploads         | /app/uploads                    | 上传文件           |
+| .（项目根）       | /app                            | 代码热重载挂载     |
+
+### 7.4 环境变量配置
+
+复制 `.env.example` 为 `.env` 并按需修改，关键变量：
+
+```bash
+PG_URI=postgresql://agent:agent123@pgsql:5432/agent
+APP_ENV=debug                  # debug / production
+ENABLE_API_DOCS=true           # 是否开启 Swagger 文档
+LANGFUSE_PUBLIC_KEY=           # Langfuse 公钥（可选）
+LANGFUSE_SECRET_KEY=           # Langfuse 私钥（可选）
+```
+
+### 7.5 开发及调试建议
 
 - 在开发 Agent 或工具后，务必执行全部测试用例。
 - 使用 `/mcp/debug/list` 和 `/mcp/debug/call` 接口调试 MCP 工具调用。
