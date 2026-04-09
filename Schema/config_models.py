@@ -83,6 +83,7 @@ class RoleModel(BaseModel):
     main_model_id: str
     fallback_model_id: Optional[str] = None
     sub_agent_ids: List[str] = Field(default_factory=list)
+    tool_ids: List[str] = Field(default_factory=list)  # ← 新增：role 直接关联的工具
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

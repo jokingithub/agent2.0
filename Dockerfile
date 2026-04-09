@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.10-slim
+ARG BASE_IMAGE=python:3.10-slim-bookworm
 FROM ${BASE_IMAGE}
 
 WORKDIR /app
@@ -7,6 +7,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	libpq-dev \
+  curl \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade pip

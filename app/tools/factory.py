@@ -104,7 +104,7 @@ def _create_claw_tool(tool_config: dict) -> StructuredTool:
         dynamic_fields[arg_name] = (py_type, default)
 
     class _ClawArgsBase(BaseModel):
-        model_config = ConfigDict(extra="forbid")
+        model_config = ConfigDict(extra="allow")
 
     ClawArgsSchema = create_model(
         f"ClawArgs_{name}",
@@ -126,11 +126,11 @@ def _create_claw_tool(tool_config: dict) -> StructuredTool:
 
             # 执行脚本
             result = subprocess.run(
-                [command, script_full_path, json_arg],
+                [command, script, json_arg],   # 改这里
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=skill_path,  # 工作目录设为 skill 根目录
+                cwd=skill_path,
                 env=proc_env,
             )
 

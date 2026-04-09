@@ -240,3 +240,130 @@ async def run_tools(state: AgentState, config: RunnableConfig) -> Dict:
         break
 
     return ret
+
+# ============================================================
+# Supervisor 直接工具执行（bind_tools 模式）
+# ============================================================
+
+async def run_supervisor_tools(state: AgentState, config: RunnableConfig = None) -> Dict:
+    """执行 Supervisor 的 tool_calls（真实工具，非 sub_agent）。
+
+    从 supervisor_scratchpad 末尾取出 Supervisor 的 AIMessage（含 tool_calls），
+    用 ToolNode 执行，结果写回 supervisor_scratchpad。
+    """
+    supervisor_pad = list(state.get("supervisor_scratchpad") or [])
+
+    if not supervisor_pad:
+        return {"supervisor_scratchpad": supervisor_pad}
+
+    last = supervisor_pad[-1]
+    tool_calls = getattr(last, "tool_calls", None) if isinstance(last, AIMessage) else None
+    if not tool_calls:
+        return {"supervisor_scratchpad": supervisor_pad}
+
+    # 注入 app_id
+    runtime_app_id = (state.get("app_id") or "").strip()
+    if runtime_app_id:
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            if "args" in tc:
+                tc["args"] = _inject_runtime_app_id(tc.get("args"), runtime_app_id)
+
+    # 加载 role 关联的直接工具实例
+    role_config = state.get("role_config") or {}
+    tool_ids = role_config.get("tool_ids", []) or []
+
+    from app.tools.factory import load_tool_from_config
+    tools = []
+    for tid in tool_ids:
+        try:
+            t = load_tool_from_config(tid, sub_agent_id=None)
+            if t:
+                tools.append(t)
+        except Exception as e:
+            logger.warning(f"加载 supervisor direct tool 失败 tool_id={tid}: {e}")
+
+    if not tools:
+        # 没有可用工具，生成错误 ToolMessage
+        err_msgs = []
+        for tc in tool_calls:
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None) or "unknown"
+            tc_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+            err_msgs.append(
+                ToolMessage(
+                    content=f"工具执行失败：未找到可用工具 '{tc_name}'",
+                    tool_call_id=tcid,
+                )
+            )
+        new_pad = supervisor_pad + err_msgs
+        return {
+            "messages": err_msgs,
+            "supervisor_scratchpad": new_pad,
+        }
+
+    node = ToolNode(tools)
+
+    try:
+        result = await node.ainvoke({"messages": supervisor_pad}, config=config)
+    except Exception as e:
+        logger.error(f"Supervisor ToolNode 执行失败: {e}", exc_info=True)
+        err_msgs = []
+        for tc in tool_calls:
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None) or "unknown"
+            err_msgs.append(
+                ToolMessage(
+                    content=f"工具执行异常: {e}",
+                    tool_call_id=tcid,
+                )
+            )
+        new_pad = supervisor_pad + err_msgs
+        return {
+            "messages": err_msgs,
+            "supervisor_scratchpad": new_pad,
+        }
+
+    out_messages = result.get("messages") if isinstance(result, dict) else (result or [])
+    out_messages = out_messages or []
+
+    logger.info(
+        "RAW_SUPERVISOR_TOOL_OUTPUT payload=%s",
+        json.dumps({"messages": [str(m) for m in out_messages]}, ensure_ascii=False, default=str),
+    )
+
+    new_pad = supervisor_pad + out_messages
+
+    ret: Dict[str, Any] = {
+        "messages": out_messages,              # 全局审计
+        "supervisor_scratchpad": new_pad,      # Supervisor 工作区继续
+    }
+
+    # 检查 HITL
+    for msg in out_messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if not content.startswith("__HITL__"):
+            continue
+        try:
+            payload = json.loads(content[len("__HITL__"):].strip() or "{}")
+        except Exception:
+            payload = {}
+
+        ret["user_input_required"] = True
+        ret["suspended_action"] = "hitl_user_input"
+        ret["pending_context"] = {
+            "interaction_id": payload.get("interaction_id", ""),
+            "question": payload.get("question", ""),
+            "input_type": payload.get("input_type", "text"),
+            "timeout_seconds": int(payload.get("timeout_seconds", 300) or 300),
+            "expected_input": payload.get("expected_input") or [],
+            "expected_schema": payload.get("expected_schema") or {},
+            "tool_call_id": getattr(msg, "tool_call_id", "") or "",
+            "current_agent": "",
+            "scene_id": state.get("scene_id", ""),
+            "selected_role_id": state.get("selected_role_id", ""),
+        }
+        break
+
+    return ret

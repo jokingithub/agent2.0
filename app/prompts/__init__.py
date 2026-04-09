@@ -3,7 +3,7 @@
 """提示词统一管理入口"""
 
 from app.prompts.supervisor import (
-    SUPERVISOR_ROUTE_PROMPT,
+    SUPERVISOR_SYSTEM_PROMPT,
     SUPERVISOR_DEFAULT_SYSTEM_PROMPT,
 )
 from app.prompts.sub_agent import (
@@ -12,7 +12,7 @@ from app.prompts.sub_agent import (
 )
 
 __all__ = [
-    "SUPERVISOR_ROUTE_PROMPT",
+    "SUPERVISOR_SYSTEM_PROMPT",
     "SUPERVISOR_DEFAULT_SYSTEM_PROMPT",
     "SUB_TASK_INJECTION_TEMPLATE",
     "FILE_LIST_TEMPLATE",

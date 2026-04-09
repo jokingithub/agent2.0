@@ -23,7 +23,7 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 
 - 所有关键业务表 (`files`, `sessions`, `memories`) 都包含 `app_id`，所有业务查询必须以 `app_id` 为过滤条件，确保多租户隔离。
 - 配置表（如 `model_connections`, `model_levels`, `roles`, `sub_agents`, `tools`, `scenes` 等）无 `app_id`，全局共享。
-- JSONB 存储格式，字段关系通过 ID 数组实现，例如：`roles.sub_agent_ids[]` 指向多个子 Agent。
+- JSONB 存储格式，字段关系通过 ID 数组实现，例如：`roles.sub_agent_ids[]` 指向多个子 Agent，`roles.tool_ids[]` 指向 Supervisor 可直接调用的工具。
 
 ### 2.2 运行时流程规范
 
@@ -31,19 +31,28 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 
 1. **网关**：进行 Bearer Token 鉴权，校验 `gateway_apps` 表的 `auth_token`。
 2. **代理转发**至主应用，读会话历史和文件列表，载入 LangGraph 运行时上下文。
-3. **Supervisor 角色节点**：
+3. **Supervisor 角色节点**（bind_tools 模式）：
    - 优先使用请求中传入 `role_id`，无则从场景默认取第一个角色。
-   - 根据角色加载可路由的子 Agent 列表。
-   - LLM 决策是直接生成答案 (FINISH) 还是路由到某子 Agent (RUN_AGENT)。
+   - 根据角色加载可路由的子 Agent 列表和直接工具列表。
+   - 子 Agent 被包装为虚拟工具（`sub_agent_xxx`，参数仅 `instruction: str`），与真实工具一起通过 `bind_tools` 绑定到 LLM。
+   - LLM 输出纯文本 = 最终回复（streaming 输出）→ FINISH；输出 tool_calls → 路由执行。
+   - 路由分两类：
+     - `sub_agent_xxx` tool_call → RUN_AGENT（提取 instruction，走子 Agent 流程）
+     - 真实工具 tool_call → RUN_SUPERVISOR_TOOL（Supervisor 直接执行工具）
 4. **Generic Agent Runner**：执行指定子 Agent。
    - 加载子 Agent 关联的模型、系统提示词、技能和工具。
    - 按需注入会话挂载文件列表。
    - 使用私有上下文（agent_scratchpad）隔离，子 Agent 仅看 Supervisor 下发的任务指令和当前工具执行结果，不可见全局对话历史。
-5. **Generic Tool Runner**：执行工具调用。
+   - 子 Agent 完成后，通过 InjectSubAgentResult 节点将结果作为 ToolMessage 回填到 `supervisor_scratchpad`，Supervisor 可继续决策。
+5. **Generic Tool Runner**：执行子 Agent 的工具调用。
    - 工具返回以 `__HITL__` 开头的 JSON 标记，系统自动进入 HITL 挂起状态。
    - 否则继续轮询 Agent / Tool 执行。
-6. **SuspendHandler**：将 HITL 挂起信息写入会话，结束当前执行。
-7. **异步保存聊天日志**，包含请求、回复、token 消耗和详细计时。
+6. **Supervisor Tool Runner**：执行 Supervisor 直接调用的工具。
+   - 从 `supervisor_scratchpad` 末尾取出 Supervisor 的 AIMessage（含 tool_calls），用 ToolNode 执行。
+   - 结果写回 `supervisor_scratchpad`，流程回到 Supervisor 继续决策。
+   - 同样支持 HITL 挂起检测。
+7. **SuspendHandler**：将 HITL 挂起信息写入会话，结束当前执行。
+8. **异步保存聊天日志**，包含请求、回复、token 消耗和详细计时。
 
 ### 2.3 工具系统规范
 
@@ -76,7 +85,8 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 | 字段 | 用途 | 可见范围 |
 |------|------|---------|
 | messages | 全局对话历史（审计/回放） | Supervisor + 日志系统 |
-| agent_scratchpad | 当前子 Agent 私有工作上下文 | 当前 Agent + ToolNode |
+| agent_scratchpad | 当前子 Agent 私有工作上下文 | 当前 Agent + GenericToolRunner |
+| supervisor_scratchpad | Supervisor 自身的工具调用上下文（bind_tools 模式下的 AIMessage + ToolMessage 链） | Supervisor + SupervisorToolRunner |
 
 - API 层必须在聊天接口开始时调用 `ensure_session`，结束时调用 `touch_session` 保障活跃时间更新。
 - 删除会话时，必须连带删除对应记忆（memories）
@@ -109,7 +119,8 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 2. 在 `roles` 表的对应角色 `sub_agent_ids` 中关联该子 Agent ID。
 3. 确保 `model_id` 指向正确模型分级记录，所有工具与技能已配置且启用。
 4. 无需改代码，系统自动加载生效。
-5. 编写清晰的系统提示词，包含角色背景和目标。
+5. 如需让 Supervisor 直接调用某工具（不经过子 Agent），在 `roles` 表的 `tool_ids` 中关联该工具 ID。
+6. 编写清晰的系统提示词，包含角色背景和目标。
 
 ### 3.2 增加新工具
 
@@ -146,7 +157,8 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 ```
 基础设施
 ├── config.py → logger.py
-├── dataBase/Schema.py → dataBase/CRUD.py → dataBase/database.py
+├── dataBase/database.py → dataBase/CRUD.py
+├── Schema/config_models.py + Schema/db_models.py + Schema/gateway_models.py
 ├── app/core/state.py → app/core/llm.py
 
 数据库层
@@ -166,12 +178,12 @@ LLM 层
 业务层
 ├── app/api.py → app/graph/builder.py
 ├── app/graph/builder.py → app/agents/* + app/tools/factory.py
-├── app/agents/supervisor.py
+├── app/agents/supervisor.py          ← bind_tools 模式，纯文本=FINISH，tool_calls=路由
 ├── app/agents/utils/
-│   ├── supervisor_utils.py
+│   ├── supervisor_utils.py           ← 虚拟工具构建、工具列表组装、tool_call 类型解析
 │   ├── agent_creator.py
-│   ├── agent_runner.py
-│   └── graph_builder.py
+│   ├── agent_runner.py               ← run_agent + run_tools + run_supervisor_tools
+│   └── graph_builder.py              ← 含 InjectSubAgentResult、SupervisorToolRunner 节点
 ├── app/tools/factory.py
 
 文件处理
@@ -188,7 +200,7 @@ LLM 层
 |------------------|-------------------------------|----------------------------------------------|
 | model_connections | protocol/base_url/api_key/models | 模型连接配置                                   |
 | model_levels      | name/level/connection_id/model | 模型分级                                     |
-| roles            | name/system_prompt/main_model_id/sub_agent_ids | 角色配置                                     |
+| roles            | name/system_prompt/main_model_id/sub_agent_ids/tool_ids | 角色配置（含直接工具）                       |
 | sub_agents       | name/system_prompt/model_id/skill_ids/tool_ids | 子 Agent配置                                  |
 | skills           | name/description/tool_ids      | 技能定义                                     |
 | tools            | name/type/category/url/method/config/enabled | 工具配置                                     |
@@ -295,6 +307,9 @@ A：确认 `file_processing` 表配置正确，字段名与前端保持一致，
 
 **Q：子 Agent 看到了其他任务的内容或工具输出？**
 A：检查 `run_agent` 和 `run_tools` 是否正确使用 `agent_scratchpad` 而非全局 `messages`。Supervisor 路由时必须清空 `agent_scratchpad`。HITL 恢复时需同步恢复 `agent_scratchpad` 状态。
+
+**Q：Supervisor 直接调用工具时，tool_calls 被输出为文本而非结构化调用？**
+A：部分模型（如 Gemini）会将 function call 以 JSON 文本形式输出到 content 中。系统已内置兜底解析（`_try_parse_tool_calls_from_content`），会自动从 content 中提取 tool_calls。如频繁出现，建议在 Supervisor prompt 中强调"必须通过 function call 调用工具"。
 
 ---
 

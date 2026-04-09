@@ -82,7 +82,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
+        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim-bookworm
     container_name: mcp-service
     ports:
       - "9001:9001"
@@ -92,12 +92,14 @@ services:
       - MCP_TRANSPORT=${MCP_TRANSPORT:-streamable-http}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=9001
+      - BAIDU_API_KEY=bce-v3/ALTAK-1IYWeTGG2qZCsR0hN8Q6x/891927cdfb39a903a7f36b2409be932b07828d2a
     command: python mcp-service/mcp-service.py
     depends_on:
       pgsql:
         condition: service_healthy
     volumes:
       - ./:/app
+      - ./skills:/app/skills        # 新增：挂载 skill 包
     restart: unless-stopped
 
   # ocr-service:

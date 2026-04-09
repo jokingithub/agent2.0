@@ -21,11 +21,14 @@ class AgentState(TypedDict):
     available_sub_agents: Optional[List[str]]
     session_files: Optional[List[Dict[str, Any]]]
 
-    # 新增：Supervisor 下发给 subagent 的任务指令
+    # Supervisor 下发给 subagent 的任务指令
     sub_task_instruction: Optional[str]
 
-    # 新增：subagent 私有工作区（不要给 Supervisor/其他agent复用）
+    # subagent 私有工作区
     agent_scratchpad: Optional[List[BaseMessage]]
+
+    # Supervisor 自身的工作上下文（bind_tools 模式下的消息历史）
+    supervisor_scratchpad: Optional[List[BaseMessage]]
 
     user_input_required: Optional[bool]
     suspended_action: Optional[str]
