@@ -147,10 +147,11 @@ services:
       langfuse:
         condition: service_started
     volumes:
+      - .:/app
+      - ./app/skills:/app/skills
       - ./sessions:/app/sessions
       - ./fileUpload:/app/fileUpload
       - ./uploads:/app/uploads
-      - .:/app          # 挂载本地代码目录（假设 docker-compose.yml 在项目根目录，且代码在 . 中）
     command: uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
