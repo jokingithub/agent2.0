@@ -92,7 +92,7 @@ services:
       - MCP_TRANSPORT=${MCP_TRANSPORT:-streamable-http}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=9001
-      - BAIDU_API_KEY=bce-v3/ALTAK-1IYWeTGG2qZCsR0hN8Q6x/891927cdfb39a903a7f36b2409be932b07828d2a
+      - BAIDU_API_KEY={$key}
     command: python mcp-service/mcp-service.py
     depends_on:
       pgsql:
