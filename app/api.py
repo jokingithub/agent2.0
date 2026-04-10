@@ -4,8 +4,9 @@
 import json
 import os
 import asyncio
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from datetime import datetime, timezone
+import tempfile
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import StreamingResponse
@@ -1036,3 +1037,88 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
         yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ============================================================
+# ClawHub Skill 导入
+# ============================================================
+
+class ScanSkillsRequest(BaseModel):
+    skills_base_dir: str = Field(default="/app/skills", description="skills 目录路径")
+
+
+@app.post("/admin/claw/scan", summary="扫描可导入的 ClawHub skill 包")
+async def scan_claw_skills(req: ScanSkillsRequest):
+    from app.tools.claw_importer import scan_and_list_skills
+    try:
+        skills_list = scan_and_list_skills(req.skills_base_dir)
+        return {"success": True, "count": len(skills_list), "skills": skills_list}
+    except Exception as e:
+        logger.error(f"扫描 skill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/claw/upload", summary="上传并导入 ClawHub skill 压缩包")
+async def upload_and_import_claw_skill(
+    file: UploadFile = File(..., description="skill 压缩包（.zip / .tar.gz / .tgz）"),
+):
+    """
+    上传 ClawHub skill 压缩包，自动解压、解析、创建 skill。
+    返回 skill_id 和建议的 system_prompt。
+    """
+    from app.tools.claw_importer import extract_skill_archive, import_claw_skill
+
+    filename = file.filename or "skill.zip"
+
+    # 验证文件格式
+    lower = filename.lower()
+    if not any(lower.endswith(ext) for ext in (".zip", ".tar.gz", ".tgz", ".tar")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件格式: {filename}（支持 .zip / .tar.gz / .tgz）"
+        )
+
+    # 保存到临时文件
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # 解压
+        skill_dir = extract_skill_archive(tmp_path, filename)
+
+        # 导入（run_command_tool_id 自动查找）
+        result = import_claw_skill(skill_dir=skill_dir)
+
+        return {"success": True, **result}
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"上传导入 skill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@app.post("/admin/claw/import", summary="导入已存在的 ClawHub skill 目录")
+async def api_import_claw_skill_from_dir(
+    skill_dir: str = Form(..., description="skill 包路径，如 /app/skills/baidu-search-1.1.3"),
+):
+    """导入服务器上已存在的 skill 目录（用于手动放置的 skill 包）。"""
+    from app.tools.claw_importer import import_claw_skill
+    try:
+        result = import_claw_skill(skill_dir=skill_dir)
+        return {"success": True, **result}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"导入 skill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

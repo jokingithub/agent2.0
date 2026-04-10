@@ -92,7 +92,8 @@ services:
       - MCP_TRANSPORT=${MCP_TRANSPORT:-streamable-http}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=9001
-      - BAIDU_API_KEY={$key}
+    env_file:
+      - .env
     command: python mcp-service/mcp-service.py
     depends_on:
       pgsql:
@@ -150,7 +151,7 @@ services:
         condition: service_started
     volumes:
       - .:/app
-      - ./app/skills:/app/skills
+      - ./skills:/app/skills
       - ./sessions:/app/sessions
       - ./fileUpload:/app/fileUpload
       - ./uploads:/app/uploads

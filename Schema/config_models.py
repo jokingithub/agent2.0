@@ -111,6 +111,7 @@ class SkillModel(BaseModel):
     name: str
     description: str
     tool_ids: List[str] = Field(default_factory=list)
+    system_prompt: Optional[str] = Field(default=None, description="技能提示词，加载时自动注入到 sub_agent 上下文")  # ← 新增
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

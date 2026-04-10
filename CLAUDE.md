@@ -44,6 +44,7 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
    - 按需注入会话挂载文件列表。
    - 使用私有上下文（agent_scratchpad）隔离，子 Agent 仅看 Supervisor 下发的任务指令和当前工具执行结果，不可见全局对话历史。
    - 子 Agent 完成后，通过 InjectSubAgentResult 节点将结果作为 ToolMessage 回填到 `supervisor_scratchpad`，Supervisor 可继续决策。
+   - 加载子 Agent 关联的技能时，skill 的 `system_prompt` 字段（如有）会自动拼接到子 Agent 的系统提示词末尾。
 5. **Generic Tool Runner**：执行子 Agent 的工具调用。
    - 工具返回以 `__HITL__` 开头的 JSON 标记，系统自动进入 HITL 挂起状态。
    - 否则继续轮询 Agent / Tool 执行。
@@ -56,10 +57,9 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 
 ### 2.3 工具系统规范
 
-- 支持三种工具类型：
-  - `local`：本地 Python 可调用函数或 LangChain BaseTool，动态加载路径格式为 `module.path:callable`。
+- 支持两种工具类型：
   - `mcp`：远程 MCP 服务，定义明确的参数字典及调用名称。
-  - `http`：HTTP 接口调用（当前无真实实现，仅为占位）。
+  - `claw`：ClawHub skill 包，通过 subprocess 调用脚本，参数以 JSON 字符串传入，捕获 stdout 作为结果。skill 包存放于 `skills/` 目录，main-app 和 mcp-service 共享挂载。
 - 工具的可见性通过配置字段控制：
   - **enabled** 必须为 true。
   - **expose_to_agent** 为 true 时才暴露给 Agent。
@@ -147,8 +147,21 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 - 模块导入顺序：标准库 → 第三方 → 项目内部。
 - 日志级别：`info` 常规流程，`warning` 降级/警告，`error` 异常。
 - 异常捕获应记录日志，但不抛出影响系统稳定。
-- 禁止在 `app/skills/` 添加本地工具（已废弃，全部走 MCP）；禁止硬编码 Agent，全部走配置表。
+- 禁止新增 `type: local` 工具（已废弃，全部走 MCP 或 claw）；禁止硬编码 Agent，全部走配置表。
+- ClawHub skill 包统一存放于项目根目录 `skills/`，通过 `run_command` MCP 工具执行。
 - **上下文隔离**：子 Agent 运行时必须使用 `agent_scratchpad` 私有上下文，不可直接访问全局 `messages`。Supervisor 路由新任务时清空 `agent_scratchpad`，确保子 Agent 仅看当前任务指令和工具结果。
+
+### 3.5 导入 ClawHub Skill 包
+
+步骤：
+
+1. 将 skill 压缩包（.zip / .tar.gz）通过前端"技能管理 → 导入 Skill 包"上传，或手动放置到 `skills/` 目录。
+2. 系统自动解析 SKILL.md frontmatter，创建 skill 记录（绑定 `run_command` MCP 工具，自动生成 `system_prompt`）。
+3. 脚本型 skill 的环境变量（如 API Key）统一在 `.env` 文件中配置，由 mcp-service 容器读取。
+4. 创建或复用 sub_agent，将导入的 skill 挂载到 `skill_ids`。
+5. skill 的 `system_prompt`（技能文档）会在运行时自动注入到 sub_agent 的上下文中。
+6. 将 sub_agent 挂载到 role 的 `sub_agent_ids` 中。
+
 
 ---
 
@@ -160,6 +173,7 @@ Agent 2.0 是一个基于配置驱动的多 Agent 对话系统，核心技术栈
 ├── dataBase/database.py → dataBase/CRUD.py
 ├── Schema/config_models.py + Schema/db_models.py + Schema/gateway_models.py
 ├── app/core/state.py → app/core/llm.py
+├── app/tools/claw_importer.py        ← ClawHub skill 包导入（解压、解析 SKILL.md、创建 skill）
 
 数据库层
 ├── dataBase/Service.py
@@ -202,7 +216,7 @@ LLM 层
 | model_levels      | name/level/connection_id/model | 模型分级                                     |
 | roles            | name/system_prompt/main_model_id/sub_agent_ids/tool_ids | 角色配置（含直接工具）                       |
 | sub_agents       | name/system_prompt/model_id/skill_ids/tool_ids | 子 Agent配置                                  |
-| skills           | name/description/tool_ids      | 技能定义                                     |
+| skills           | name/description/tool_ids/system_prompt | 技能定义（含可选提示词，加载时自动注入 sub_agent） |
 | tools            | name/type/category/url/method/config/enabled | 工具配置                                     |
 | file_processing  | file_type/fields/prompt        | 文件抽取字段配置                             |
 | scenes           | scene_code/available_role_ids  | 场景配置（支持多角色）                       |
@@ -268,6 +282,7 @@ docker-compose up
 | ./sessions        | /app/sessions                   | 会话文件           |
 | ./uploads         | /app/uploads                    | 上传文件           |
 | .（项目根）       | /app                            | 代码热重载挂载     |
+| ./skills          | /app/skills                     | ClawHub skill 包（main-app 与 mcp-service 共享） |
 
 ### 7.4 环境变量配置
 
