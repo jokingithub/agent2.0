@@ -13,6 +13,8 @@ class GatewayEnvModel(BaseModel):
     id: Optional[Any] = Field(alias="_id", default=None)
     port: int = 8000
     whitelist: List[str] = Field(default_factory=list)
+    gateway_base_url: str = Field(default="", description="网关地址（前端聊天接口）")
+    inner_base_url: str = Field(default="", description="内部地址（前端配置接口）")
     updated_at: datetime = Field(default_factory=datetime.now)
 
 
