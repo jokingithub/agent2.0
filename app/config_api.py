@@ -625,6 +625,52 @@ def get_enabled_tools():
 def get_tools_by_type(tool_type: str):
     return _tool_service.get_by_type(tool_type)
 
+async def _sync_mcp_tools_core_async(
+    url: str = "http://mcp-service:9001/sse",
+    default_category: str = "mcp",
+    prune_missing: bool = False,
+) -> dict:
+    mcp_tools = await _fetch_mcp_tools(url)
+
+    remote_tool_names = {t["name"] for t in mcp_tools}
+    synced = []
+    for t in mcp_tools:
+        payload = {
+            "name": t["name"],
+            "type": "mcp",
+            "category": default_category,
+            "url": url,
+            "enabled": True,
+            "description": t.get("description", ""),
+            "config": {
+                "remote_tool_name": t["name"],
+                "arg_names": t.get("arg_names", {}),
+                "expose_to_agent": True,
+            },
+        }
+        doc_id = _tool_service.upsert_mcp_tool(payload)
+        synced.append({"id": doc_id, "name": t["name"]})
+
+    disabled = []
+    if prune_missing:
+        local_mcp_tools = _tool_service.query({"type": "mcp", "url": url})
+        for x in local_mcp_tools:
+            if x.get("name") not in remote_tool_names and x.get("enabled", True):
+                _tool_service.update(x["_id"], {"enabled": False})
+                disabled.append({"id": x.get("_id"), "name": x.get("name")})
+
+    return {
+        "count": len(synced),
+        "tools": synced,
+        "disabled_count": len(disabled),
+    }
+
+def _sync_mcp_tools_core(
+    url: str = "http://mcp-service:9001/sse",
+    default_category: str = "mcp",
+    prune_missing: bool = False,
+) -> dict:
+    return asyncio.run(_sync_mcp_tools_core_async(url, default_category, prune_missing))
 
 @router.post("/tools/sync-from-mcp", summary="从MCP服务扫描并同步工具")
 def sync_tools_from_mcp(data: MCPToolSyncRequest):

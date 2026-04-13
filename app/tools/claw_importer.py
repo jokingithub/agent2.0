@@ -336,3 +336,56 @@ def _build_system_prompt(
     ])
 
     return "\n".join(parts)
+
+def auto_import_all_skills(skills_base_dir: str = LOCAL_SKILLS_BASE) -> List[Dict[str, Any]]:
+    """
+    启动时自动扫描 skills 目录，跳过已导入的，导入新的。
+    单个 skill 失败不影响其他。
+    """
+    results = []
+
+    base = Path(skills_base_dir)
+    if not base.exists():
+        logger.info(f"Skills 目录不存在，跳过自动导入: {skills_base_dir}")
+        return results
+
+    try:
+        run_command_tool_id = _find_run_command_tool_id()
+    except ValueError as e:
+        logger.warning(f"自动导入跳过：{e}")
+        return results
+
+    existing_names = set()
+    for s in (_skill_service.get_all() or []):
+        name = (s.get("name") or "").strip()
+        if name:
+            existing_names.add(name)
+
+    available = scan_and_list_skills(skills_base_dir)
+    if not available:
+        logger.info("Skills 目录为空，无需导入")
+        return results
+
+    for skill_info in available:
+        display_name = f"{skill_info['emoji']} {skill_info['name']}"
+
+        if display_name in existing_names:
+            logger.info(f"⏭️  跳过已存在: {display_name}")
+            continue
+
+        try:
+            result = import_claw_skill(
+                skill_dir=skill_info["path"],
+                run_command_tool_id=run_command_tool_id,
+            )
+            results.append(result)
+            logger.info(f"✅ 自动导入成功: {display_name}")
+        except Exception as e:
+            logger.warning(f"⚠️  自动导入失败 [{display_name}]: {e}")
+
+    if results:
+        logger.info(f"📦 自动导入完成，共导入 {len(results)} 个 skill")
+    else:
+        logger.info("📦 自动导入完成，无新 skill 需要导入")
+
+    return results

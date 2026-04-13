@@ -22,7 +22,7 @@ from app.core.callbacks import UsageCollector
 from fileUpload.fileUpload import save_file
 from logger import logger
 from config import Config
-from app.config_api import router as config_router
+from app.config_api import router as config_router, _sync_mcp_tools_core_async
 from app.session_api import router as session_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
@@ -55,6 +55,26 @@ warnings.filterwarnings(
     "ignore",
     message=r".*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
 )
+@app.on_event("startup")
+async def startup_auto_sync_and_import():
+    """启动时自动同步 MCP 工具 + 导入 ClawHub skill 包"""
+    # 1) 先同步 MCP 工具（确保 run_command 存在）
+    try:
+        result = await _sync_mcp_tools_core_async(
+            url="http://mcp-service:9001/sse",
+            default_category="mcp",
+            prune_missing=False,
+        )
+        logger.info(f"✅ 启动时 MCP 工具同步完成，共 {result['count']} 个工具")
+    except Exception as e:
+        logger.warning(f"启动时 MCP 工具同步失败（不影响启动）: {e}")
+
+    # 2) 再导入 ClawHub skill
+    try:
+        from app.tools.claw_importer import auto_import_all_skills
+        auto_import_all_skills()
+    except Exception as e:
+        logger.warning(f"自动导入 skill 失败（不影响启动）: {e}")
 app.include_router(config_router)
 app.include_router(session_router)
 app.include_router(file_router)
