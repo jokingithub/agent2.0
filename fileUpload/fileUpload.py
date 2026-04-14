@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime
 
-from dataBase.Schema import FileModel
+from Schema.db_models import FileModel
 from dataBase.Service import FileService, SessionService
 from dataBase.ConfigService import FileProcessingService
 

@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from .database import Database
 from .CRUD import CRUD
-from .Schema import (
+from Schema import (
     ModelConnectionModel, ModelLevelModel,
     GatewayEnvModel, GatewayAppModel, GatewayChannelModel,ToolModel, ChatLogModel,
     RoleModel, SubAgentModel, SkillModel,

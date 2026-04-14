@@ -4,29 +4,33 @@
 import json
 import os
 import asyncio
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from datetime import datetime, timezone
+import tempfile
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import warnings
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from langchain_core.callbacks import AsyncCallbackHandler
 
-from app.graph.builder import create_graph
-from app.Schema import ChatRequest, ChatResponse, UploadResponse, UsageCollector
-from app.Schema import ResumeHITLRequest
+from app.agents.utils.graph_builder import create_graph
+from Schema import ChatRequest, ChatResponse, UploadResponse, ResumeHITLRequest
+from app.core.callbacks import UsageCollector
 from fileUpload.fileUpload import save_file
 from logger import logger
 from config import Config
-from app.config_api import router as config_router
+from app.config_api import router as config_router, _sync_mcp_tools_core_async
 from app.session_api import router as session_router
 from dataBase.ConfigService import ChatLogService
 from dataBase.Service import SessionService
 from fastapi.middleware.cors import CORSMiddleware
 from app.file_api import router as file_router
-
+warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic\.main")
+warnings.filterwarnings("ignore", category=UserWarning, message=r".*Pydantic serializer warnings.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=r".*PydanticSerializationUnexpectedValue.*")
 
 try:
     from langfuse.langchain import CallbackHandler
@@ -36,7 +40,10 @@ except Exception:
 _docs_url = "/docs" if Config.ENABLE_API_DOCS else None
 _redoc_url = "/redoc" if Config.ENABLE_API_DOCS else None
 _openapi_url = "/openapi.json" if Config.ENABLE_API_DOCS else None
-
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
+)
 app = FastAPI(
     title="AI2.0 API",
     version="1.0.0",
@@ -44,6 +51,30 @@ app = FastAPI(
     redoc_url=_redoc_url,
     openapi_url=_openapi_url,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
+)
+@app.on_event("startup")
+async def startup_auto_sync_and_import():
+    """启动时自动同步 MCP 工具 + 导入 ClawHub skill 包"""
+    # 1) 先同步 MCP 工具（确保 run_command 存在）
+    try:
+        result = await _sync_mcp_tools_core_async(
+            url="http://mcp-service:9001/sse",
+            default_category="mcp",
+            prune_missing=False,
+        )
+        logger.info(f"✅ 启动时 MCP 工具同步完成，共 {result['count']} 个工具")
+    except Exception as e:
+        logger.warning(f"启动时 MCP 工具同步失败（不影响启动）: {e}")
+
+    # 2) 再导入 ClawHub skill
+    try:
+        from app.tools.claw_importer import auto_import_all_skills
+        auto_import_all_skills()
+    except Exception as e:
+        logger.warning(f"自动导入 skill 失败（不影响启动）: {e}")
 app.include_router(config_router)
 app.include_router(session_router)
 app.include_router(file_router)
@@ -203,10 +234,8 @@ def _classify_message(msg) -> dict[str, Any]:
         }
 
     if isinstance(msg, AIMessage):
-        # AI 消息带 tool_calls 的是"调用请求"，不是最终回复
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
-            # 提取调用摘要给前端展示（可选）
             call_summaries = []
             for tc in tool_calls:
                 name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
@@ -216,13 +245,11 @@ def _classify_message(msg) -> dict[str, Any]:
                 "content": content,
                 "tool_names": call_summaries,
             }
-        # 普通 AI 回复
         return {
             "message_type": "assistant",
             "content": content,
         }
 
-    # 兜底
     return {
         "message_type": "unknown",
         "content": content,
@@ -243,9 +270,7 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
         classified = _classify_message(msg)
         content = classified.get("content", "")
 
-        # 跳过空内容的 tool_call 请求（前端不需要看到空的调用指令）
         if classified["message_type"] == "tool_call" and not content:
-            # 但仍然发一个"正在调用工具"的提示
             event = {
                 "node": node_name,
                 "message_type": "tool_call",
@@ -284,6 +309,278 @@ def _extract_node_events(node_name: str, node_value: dict) -> list[dict[str, Any
     return events
 
 
+def _to_loggable(obj: Any) -> Any:
+    """尽量把任意对象转成可 JSON 序列化结构，失败再退回字符串。"""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, dict):
+        return {str(k): _to_loggable(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_loggable(x) for x in obj]
+
+    if isinstance(obj, BaseMessage):
+        data = {
+            "type": obj.__class__.__name__,
+            "content": getattr(obj, "content", ""),
+            "name": getattr(obj, "name", ""),
+            "additional_kwargs": getattr(obj, "additional_kwargs", {}) or {},
+            "response_metadata":
+             getattr(obj, "response_metadata", {}) or {},
+        }
+        ak = data.get("additional_kwargs") or {}
+        if not data.get("content") and isinstance(ak, dict) and ak.get("_raw_content"):
+            data["raw_content"] = ak.get("_raw_content")
+        tool_calls = getattr(obj, "tool_calls", None)
+        if tool_calls is not None:
+            data["tool_calls"] = _to_loggable(tool_calls)
+        tool_call_id = getattr(obj, "tool_call_id", None)
+        if tool_call_id:
+            data["tool_call_id"] = tool_call_id
+        return data
+
+    if hasattr(obj, "model_dump"):
+        try:
+            return _to_loggable(obj.model_dump())
+        except Exception:
+            pass
+
+    return str(obj)
+
+
+# ============================================================
+# 节点输出处理（统一提取，消除三接口重复）
+# ============================================================
+
+# 需要检查 HITL 挂起的节点集合
+_HITL_TOOL_RUNNER_NODES = frozenset({"GenericToolRunner", "SupervisorToolRunner"})
+
+
+def _build_base_meta(node_name: str, node_value: dict) -> dict[str, Any]:
+    """从节点输出中提取元信息（role / sub_agent）。"""
+    meta: dict[str, Any] = {}
+    if not isinstance(node_value, dict):
+        return meta
+
+    if node_name == "Supervisor":
+        role_name = node_value.get("role_name")
+        if role_name:
+            meta["role"] = role_name
+        if node_value.get("current_agent"):
+            meta["sub_agent"] = node_value["current_agent"]
+
+    elif node_name in ("GenericAgentRunner", "GenericToolRunner", "SupervisorToolRunner"):
+        if node_value.get("current_agent"):
+            meta["sub_agent"] = node_value["current_agent"]
+
+    return meta
+
+
+def _build_suspend_event(node_name: str, node_value: dict) -> Optional[dict[str, Any]]:
+    """如果节点标记了 user_input_required，构建 suspend 事件；否则返回 None。"""
+    if node_name not in _HITL_TOOL_RUNNER_NODES:
+        return None
+    if not isinstance(node_value, dict) or not node_value.get("user_input_required"):
+        return None
+
+    pending = node_value.get("pending_context") or {}
+    return {
+        "node": node_name,
+        "message_type": "suspend",
+        "message": "需要用户输入，流程已挂起",
+        "interaction_id": pending.get("interaction_id", ""),
+        "question": pending.get("question", ""),
+        "input_type": pending.get("input_type", "text"),
+        "expected_input": pending.get("expected_input") or [],
+        "expected_schema": pending.get("expected_schema") or {},
+        "timeout_seconds": pending.get("timeout_seconds", 300),
+    }
+
+
+def _process_node_output(
+    node_name: str,
+    node_value: Any,
+    *,
+    skip_assistant_content: bool = False,
+) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """处理单个节点输出，返回 (事件列表, 最新 assistant 内容 or None)。
+
+    Args:
+        node_name: 节点名
+        node_value: 节点输出值
+        skip_assistant_content: 若为 True，assistant 类型消息不生成 node 事件
+                                （流式模式下 assistant 内容通过 token 事件推送）
+
+    Returns:
+        (events, latest_assistant_content)
+    """
+    events: list[dict[str, Any]] = []
+    latest_assistant: Optional[str] = None
+
+    if not isinstance(node_value, dict):
+        events.append({"node": node_name})
+        return events, latest_assistant
+
+    base_meta = _build_base_meta(node_name, node_value)
+    msg_events = _extract_node_events(node_name, node_value)
+
+    if msg_events:
+        for me in msg_events:
+            me.update(base_meta)
+
+            if me.get("message_type") == "assistant":
+                content = me.get("message", "")
+                if isinstance(content, str) and content.strip():
+                    latest_assistant = content
+                if skip_assistant_content:
+                    continue
+
+            events.append(me)
+
+        # HITL 挂起检测
+        suspend_evt = _build_suspend_event(node_name, node_value)
+        if suspend_evt:
+            events.append(suspend_evt)
+    else:
+        event = {"node": node_name, **base_meta}
+        events.append(event)
+
+    return events, latest_assistant
+
+
+# ============================================================
+# 输入构建（统一 /chat 和 /chat/stream）
+# ============================================================
+
+def _build_session_file_refs(session_service: SessionService, session_id: str, app_id: str) -> list[dict[str, Any]]:
+    files = session_service.get_session_files_content(session_id, app_id=app_id) or []
+    result: list[dict[str, Any]] = []
+    for f in files:
+        result.append({
+            "file_id": f.get("file_id") or "",
+            "file_name": f.get("file_name") or "",
+            "main_info": f.get("main_info") or {},
+        })
+    return result
+
+
+def _build_graph_inputs(
+    session_service: SessionService,
+    session_id: str,
+    app_id: str,
+    scene_id: str,
+    role_id: str,
+    user_message: str,
+) -> dict[str, Any]:
+    """构建 graph.astream 的输入字典。/chat 和 /chat/stream 共用。"""
+    history = session_service.memory_service.get_recent_messages(
+        session_id, last_n=20, app_id=app_id
+    )
+    messages = [(msg["role"], msg["content"]) for msg in history]
+
+    session_files = _build_session_file_refs(session_service, session_id, app_id)
+    files_json = json.dumps(session_files or [], ensure_ascii=False)
+    messages.append((
+        "system",
+        f"当前会话挂靠文件信息如下（为空数组表示无挂靠）:\n<files>\n{files_json}\n</files>"
+    ))
+    messages.append(("user", user_message))
+
+    return {
+        "session_id": session_id,
+        "app_id": app_id,
+        "scene_id": scene_id or "default",
+        "selected_role_id": role_id or "",
+        "messages": messages,
+        "session_files": session_files,
+    }
+
+
+# ============================================================
+# 流式双队列循环（统一 /chat/stream 和 /hitl/resume）
+# ============================================================
+
+async def _stream_graph_with_tokens(
+    graph_aiter,
+    token_queue: "asyncio.Queue[str]",
+    *,
+    skip_assistant_content: bool = True,
+):
+    """统一的流式双队列循环。
+
+    同时消费 graph 节点输出和 token 队列，交替 yield SSE 事件。
+    graph_aiter: 一个 async generator，yield 的是 node 事件的 SSE 字符串或 (node_name, node_value) 元组。
+
+    Yields:
+        SSE 格式字符串
+    """
+    final_message = ""
+
+    async def _run_graph():
+        nonlocal final_message
+        async for output in graph_aiter:
+            for node_name, node_value in output.items():
+                events, assistant_content = _process_node_output(
+                    node_name, node_value,
+                    skip_assistant_content=skip_assistant_content,
+                )
+                if assistant_content:
+                    final_message = assistant_content
+
+                for evt in events:
+                    yield f"event: node\ndata: {json.dumps(evt, ensure_ascii=False)}\n\n"
+
+    done = False
+    graph_iter = _run_graph().__aiter__()
+    graph_next_task = asyncio.create_task(graph_iter.__anext__())
+    token_task = asyncio.create_task(token_queue.get())
+
+    while True:
+        wait_set = {t for t in (graph_next_task, token_task) if t is not None}
+        if not wait_set:
+            break
+
+        finished, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+
+        if token_task in finished:
+            token = token_task.result()
+            token_payload = {"message_type": "token", "delta": token}
+            yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
+            if not done:
+                token_task = asyncio.create_task(token_queue.get())
+            else:
+                token_task = None
+
+        if graph_next_task in finished:
+            try:
+                node_chunk = graph_next_task.result()
+                yield node_chunk
+                graph_next_task = asyncio.create_task(graph_iter.__anext__())
+            except StopAsyncIteration:
+                done = True
+                graph_next_task = None
+                # 尾部 token 轮询
+                while True:
+                    try:
+                        token = await asyncio.wait_for(token_queue.get(), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        break
+                    token_payload = {"message_type": "token", "delta": token}
+                    yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
+                if token_task is not None:
+                    token_task.cancel()
+                    token_task = None
+                break
+
+    # 通过闭包返回 final_message
+    _stream_graph_with_tokens._last_final_message = final_message
+
+
+# ============================================================
+# StreamTokenCallback
+# ============================================================
+
 class StreamTokenCallback(AsyncCallbackHandler):
     """把 LLM token 写入 asyncio.Queue，供 SSE 实时输出。
 
@@ -299,10 +596,8 @@ class StreamTokenCallback(AsyncCallbackHandler):
     def __init__(self, queue: "asyncio.Queue[str]"):
         super().__init__()
         self.queue = queue
-
-        # 仅屏蔽路由节点的结构化输出 token，避免把 next/next_action 等 JSON 直接透传给前端
-        self._blocked_nodes = {"Supervisor"}
-
+        # 不再屏蔽任何节点 — Supervisor 现在直接输出自然语言
+        self._blocked_nodes: set[str] = set()
         self._blocked_run_ids: set[str] = set()
         self._allowed_run_ids: set[str] = set()
 
@@ -351,11 +646,9 @@ class StreamTokenCallback(AsyncCallbackHandler):
         state = self._stream_states.get(stream_key)
         if state is None:
             state = {
-                "mode": "unknown",      # unknown | passthrough | structured | done
+                "mode": "unknown",
                 "sniff": "",
-
-                # structured 模式状态
-                "phase": "find_key",    # find_key | find_colon | find_quote | in_answer | done
+                "phase": "find_key",
                 "key_window": "",
                 "seen_colon": False,
 
@@ -460,11 +753,6 @@ class StreamTokenCallback(AsyncCallbackHandler):
                     state["unicode_mode"] = False
                     state["unicode_buf"] = ""
                 elif ch == "n":
-                    # null
-                    state["phase"] = "done"
-                    state["mode"] = "done"
-                else:
-                    # 非字符串值（极少见），不解析，直接结束
                     state["phase"] = "done"
                     state["mode"] = "done"
                 continue
@@ -495,7 +783,6 @@ class StreamTokenCallback(AsyncCallbackHandler):
         if mode in ("structured", "done"):
             return self._consume_structured_token(state, token)
 
-        # unknown：先嗅探是否结构化 JSON
         state["sniff"] += token
         sniff = state["sniff"]
         stripped = sniff.lstrip()
@@ -515,8 +802,7 @@ class StreamTokenCallback(AsyncCallbackHandler):
             state["sniff"] = ""
             return self._consume_structured_token(state, sniff)
 
-        # 给结构化输出一点缓冲窗口，避免误判
-        if len(sniff) > 256:
+        if len(sniff) > 96:
             state["mode"] = "passthrough"
             state["sniff"] = ""
             return sniff
@@ -631,35 +917,6 @@ async def _save_chat_log(
     except Exception as e:
         logger.error(f"保存会话日志失败: {e}", exc_info=True)
 
-def _build_session_file_refs(session_service: SessionService, session_id: str, app_id: str) -> list[dict[str, Any]]:
-    files = session_service.get_session_files_content(session_id, app_id=app_id) or []
-    result: list[dict[str, Any]] = []
-    for f in files:
-        result.append({
-            "file_id": f.get("file_id") or "",
-            "file_name": f.get("file_name") or "",
-            "main_info": f.get("main_info") or {},
-        })
-    return result
-
-def _print_request_token_summary(
-    endpoint: str,
-    session_id: str,
-    app_id: str,
-    scene_id: str,
-    collector: UsageCollector,
-):
-    logger.info(
-        f"[TOKEN][REQ] endpoint={endpoint} app_id={app_id} scene_id={scene_id} session_id={session_id} "
-        f"calls={len(collector.call_details)} total={collector.total_tokens} "
-        f"prompt={collector.prompt_tokens} completion={collector.completion_tokens} "
-        f"final_model={collector.final_model} final_agent={collector.final_agent} "
-        f"errors={collector.error_count} "
-        f"cached_tokens={collector.cached_tokens} cache_hit_calls={collector.cache_hit_calls} "
-    )
-    if collector.last_error:
-        logger.info(f"[TOKEN][REQ][LAST_ERROR] {collector.last_error}")
-
 
 # ============================================================
 # /chat — 非流式
@@ -676,28 +933,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
     session_service = SessionService()
     session_service.ensure_session(req.session_id, app_id=app_id)
 
-    history = session_service.memory_service.get_recent_messages(
-        req.session_id, last_n=20, app_id=app_id
+    inputs = _build_graph_inputs(
+        session_service, req.session_id, app_id,
+        req.scene_id, req.role_id, req.message,
     )
-
-    messages = [(msg["role"], msg["content"]) for msg in history]
-    session_files = _build_session_file_refs(session_service, req.session_id, app_id)
-    if session_files:
-        messages.append((
-            "system",
-            "当前会话已挂靠文件信息如下:\n"
-            + json.dumps(session_files, ensure_ascii=False)
-        ))
-    messages.append(("user", req.message))
-
-    inputs = {
-        "session_id": req.session_id,
-        "app_id": app_id,
-        "scene_id": req.scene_id or "default",
-        "selected_role_id": req.role_id or "",  # ← 新增
-        "messages": messages,
-        "session_files": session_files,
-    }
 
     events: list[dict[str, Any]] = []
     final_message = ""
@@ -711,61 +950,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
         },
     ):
         for node_name, node_value in output.items():
-            # ---- 节点级元信息 ----
-            base_meta: dict[str, Any] = {}
-            if isinstance(node_value, dict):
-                if node_name == "Supervisor":
-                    role_name = node_value.get("role_name")
-                    if role_name:
-                        base_meta["role"] = role_name
-                    if node_value.get("current_agent"):
-                        base_meta["sub_agent"] = node_value["current_agent"]
-
-                if node_name in ("GenericAgentRunner", "GenericToolRunner"):
-                    if node_value.get("current_agent"):
-                        base_meta["sub_agent"] = node_value["current_agent"]
-
-            # ---- 逐条消息生成事件 ----
-            msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
-
-            if msg_events:
-                for me in msg_events:
-                    me.update(base_meta)  # 合入 role / sub_agent
-                    events.append(me)
-                    # 只有 assistant 类型的消息才算最终回复
-                    if me.get("message_type") == "assistant":
-                        content = me.get("message", "")
-                        if isinstance(content, str) and content.strip():
-                            final_message = content
-
-                # HITL: tool runner 标记需要用户输入时，输出挂起事件
-                if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
-                    pending = node_value.get("pending_context") or {}
-                    suspend_event = {
-                        "node": node_name,
-                        "message_type": "suspend",
-                        "event_type": "observation",
-                        "message": "需要用户输入，流程已挂起",
-                        "interaction_id": pending.get("interaction_id", ""),
-                        "question": pending.get("question", ""),
-                        "input_type": pending.get("input_type", "text"),
-                        "expected_input": pending.get("expected_input") or [],
-                        "expected_schema": pending.get("expected_schema") or {},
-                        "timeout_seconds": pending.get("timeout_seconds", 300),
-                    }
-                    events.append(suspend_event)
-            else:
-                # 无消息的节点（如 Supervisor 只做路由）
-                event = {"node": node_name, **base_meta}
-                events.append(event)
-
-    _print_request_token_summary(
-        endpoint="/chat",
-        session_id=req.session_id,
-        app_id=app_id,
-        scene_id=req.scene_id or "default",
-        collector=collector,
-    )
+            node_events, assistant_content = _process_node_output(
+                node_name, node_value, skip_assistant_content=False,
+            )
+            if assistant_content:
+                final_message = assistant_content
+            events.extend(node_events)
 
     asyncio.create_task(_save_chat_log(
         app_id=app_id,
@@ -803,153 +993,26 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     session_service = SessionService()
     session_service.ensure_session(req.session_id, app_id=app_id)
 
-    history = session_service.memory_service.get_recent_messages(
-        req.session_id, last_n=20, app_id=app_id
+    inputs = _build_graph_inputs(
+        session_service, req.session_id, app_id,
+        req.scene_id, req.role_id, req.message,
     )
 
-    messages = [(msg["role"], msg["content"]) for msg in history]
-    session_files = _build_session_file_refs(session_service, req.session_id, app_id)
-    files_json = json.dumps(session_files or [], ensure_ascii=False)
-    messages.append((
-        "system",
-        f"当前会话挂靠文件信息如下（为空数组表示无挂靠）:\n<files>\n{files_json}\n</files>"
-    ))
-    messages.append(("user", req.message))
-
-    inputs = {
-        "session_id": req.session_id,
-        "app_id": app_id,
-        "scene_id": req.scene_id or "default",
-        "selected_role_id": req.role_id or "",  # ← 新增
-        "messages": messages,
-        "session_files": session_files,
-    }
-
     async def event_gen():
-        token_sent = False
-        final_message = ""
-
-        async def run_graph():
-            nonlocal final_message
-            async for output in graph.astream(
-                inputs,
-                config={
-                    "recursion_limit": req.recursion_limit,
-                    "configurable": {"thread_id": req.session_id},
-                    "callbacks": callbacks,
-                },
-            ):
-                for node_name, node_value in output.items():
-                    # ---- 节点级元信息 ----
-                    base_meta: dict[str, Any] = {}
-                    if isinstance(node_value, dict):
-                        if node_name == "Supervisor":
-                            role_name = node_value.get("role_name")
-                            if role_name:
-                                base_meta["role"] = role_name
-                            if node_value.get("current_agent"):
-                                base_meta["sub_agent"] = node_value["current_agent"]
-
-                        if node_name in ("GenericAgentRunner", "GenericToolRunner"):
-                            if node_value.get("current_agent"):
-                                base_meta["sub_agent"] = node_value["current_agent"]
-
-                    # ---- 逐条消息生成事件 ----
-                    msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
-
-                    if msg_events:
-                        for me in msg_events:
-                            me.update(base_meta)
-                            # 只有 assistant 类型才更新 final_message
-                            if me.get("message_type") == "assistant":
-                              content = me.get("message", "")
-                              if isinstance(content, str) and content.strip():
-                                  final_message = content
-
-                              # 只有真的发过 token，才跳过 assistant node，避免双发
-                              if token_sent:
-                                  continue
-
-                              # 没有 token 的情况下，回退发送 assistant node
-                              yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
-                              continue
-
-                        # HITL 挂起事件
-                        if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
-                            pending = node_value.get("pending_context") or {}
-                            suspend_payload = {
-                                "node": node_name,
-                                "message_type": "suspend",
-                                "event_type": "observation",
-                                "message": "需要用户输入，流程已挂起",
-                                "interaction_id": pending.get("interaction_id", ""),
-                                "question": pending.get("question", ""),
-                                "input_type": pending.get("input_type", "text"),
-                                "expected_input": pending.get("expected_input") or [],
-                                "expected_schema": pending.get("expected_schema") or {},
-                                "timeout_seconds": pending.get("timeout_seconds", 300),
-                            }
-                            yield f"event: node\ndata: {json.dumps(suspend_payload, ensure_ascii=False)}\n\n"
-                    else:
-                        payload = {"node": node_name, **base_meta}
-                        yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        done = False
-        graph_iter = run_graph().__aiter__()
-        graph_next_task = asyncio.create_task(graph_iter.__anext__())
-        token_task = asyncio.create_task(token_queue.get())
-
-        while True:
-            wait_set = {t for t in (graph_next_task, token_task) if t is not None}
-            if not wait_set:
-                break
-
-            finished, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
-
-            if token_task in finished:
-                token = token_task.result()
-                token_sent = True
-                token_payload = {
-                    "message_type": "token",
-                    "delta": token,
-                }
-                yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
-                if not done:
-                    token_task = asyncio.create_task(token_queue.get())
-                else:
-                    token_task = None
-
-            if graph_next_task in finished:
-                try:
-                    node_chunk = graph_next_task.result()
-                    yield node_chunk
-                    graph_next_task = asyncio.create_task(graph_iter.__anext__())
-                except StopAsyncIteration:
-                    done = True
-                    graph_next_task = None
-                    # 给队列一个轮询窗口，尽量把尾部 token 发完
-                    while True:
-                        try:
-                            token = await asyncio.wait_for(token_queue.get(), timeout=0.05)
-                        except asyncio.TimeoutError:
-                            break
-                        token_payload = {
-                            "message_type": "token",
-                            "delta": token,
-                        }
-                        yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
-                    if token_task is not None:
-                        token_task.cancel()
-                        token_task = None
-                    break
-
-        _print_request_token_summary(
-            endpoint="/chat/stream",
-            session_id=req.session_id,
-            app_id=app_id,
-            scene_id=req.scene_id or "default",
-            collector=collector,
+        graph_aiter = graph.astream(
+            inputs,
+            config={
+                "recursion_limit": req.recursion_limit,
+                "configurable": {"thread_id": req.session_id},
+                "callbacks": callbacks,
+            },
         )
+
+        final_message = ""
+        async for chunk in _stream_graph_with_tokens(graph_aiter, token_queue):
+            yield chunk
+
+        final_message = getattr(_stream_graph_with_tokens, "_last_final_message", "")
 
         asyncio.create_task(_save_chat_log(
             app_id=app_id,
@@ -971,6 +1034,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
+
+# ============================================================
+# HITL 状态查询
+# ============================================================
 
 @app.get("/sessions/{session_id}/hitl/status")
 async def get_hitl_status(session_id: str, app_id: str):
@@ -997,6 +1064,10 @@ async def get_hitl_status(session_id: str, app_id: str):
     }
 
 
+# ============================================================
+# /hitl/resume — HITL 恢复（流式）
+# ============================================================
+
 @app.post("/sessions/{session_id}/hitl/resume")
 async def resume_hitl(session_id: str, req: ResumeHITLRequest):
     svc = SessionService()
@@ -1007,7 +1078,7 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
     token_cb = StreamTokenCallback(token_queue)
     callbacks = [collector, token_cb]
 
-    # 先校验并恢复挂起状态（失败直接HTTP错误）
+    # 校验并恢复挂起状态
     result = svc.resume_pending_interaction(
         session_id=session_id,
         app_id=req.app_id,
@@ -1026,8 +1097,6 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
     resume_inputs = svc.build_resume_graph_inputs(session_id=session_id, app_id=req.app_id)
 
     async def event_gen():
-        final_message = ""
-
         if not resume_inputs:
             done_payload = {
                 "ok": True,
@@ -1042,119 +1111,23 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
             yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
             return
 
-        async def run_graph():
-            nonlocal final_message
-            async for output in graph.astream(
-                resume_inputs,
-                config={
-                    "recursion_limit": req.recursion_limit,
-                    "configurable": {"thread_id": session_id},
-                    "callbacks": callbacks,
-                },
-            ):
-                for node_name, node_value in output.items():
-                    base_meta: dict[str, Any] = {}
-                    if isinstance(node_value, dict):
-                        if node_name == "Supervisor":
-                            role_name = node_value.get("role_name")
-                            if role_name:
-                                base_meta["role"] = role_name
-                            if node_value.get("current_agent"):
-                                base_meta["sub_agent"] = node_value["current_agent"]
+        graph_aiter = graph.astream(
+            resume_inputs,
+            config={
+                "recursion_limit": req.recursion_limit,
+                "configurable": {"thread_id": session_id},
+                "callbacks": callbacks,
+            },
+        )
 
-                        if node_name in ("GenericAgentRunner", "GenericToolRunner"):
-                            if node_value.get("current_agent"):
-                                base_meta["sub_agent"] = node_value["current_agent"]
+        final_message = ""
+        async for chunk in _stream_graph_with_tokens(graph_aiter, token_queue):
+            yield chunk
 
-                    msg_events = _extract_node_events(node_name, node_value) if isinstance(node_value, dict) else []
-
-                    if msg_events:
-                        for me in msg_events:
-                            me.update(base_meta)
-                            if me.get("message_type") == "assistant":
-                              content = me.get("message", "")
-                              if isinstance(content, str) and content.strip():
-                                  final_message = content
-
-                              # 只有真的发过 token，才跳过 assistant node，避免双发
-                              if token_sent:
-                                  continue
-
-                              # 没有 token 的情况下，回退发送 assistant node
-                              yield f"event: node\ndata: {json.dumps(me, ensure_ascii=False)}\n\n"
-                              continue
-
-                        if node_name == "GenericToolRunner" and node_value.get("user_input_required"):
-                            pending = node_value.get("pending_context") or {}
-                            suspend_payload = {
-                                "node": node_name,
-                                "message_type": "suspend",
-                                "event_type": "observation",
-                                "message": "需要用户输入，流程已挂起",
-                                "interaction_id": pending.get("interaction_id", ""),
-                                "question": pending.get("question", ""),
-                                "input_type": pending.get("input_type", "text"),
-                                "expected_input": pending.get("expected_input") or [],
-                                "expected_schema": pending.get("expected_schema") or {},
-                                "timeout_seconds": pending.get("timeout_seconds", 300),
-                            }
-                            yield f"event: node\ndata: {json.dumps(suspend_payload, ensure_ascii=False)}\n\n"
-                    else:
-                        payload = {"node": node_name, **base_meta}
-                        yield f"event: node\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        done = False
-        graph_iter = run_graph().__aiter__()
-        graph_next_task = asyncio.create_task(graph_iter.__anext__())
-        token_task = asyncio.create_task(token_queue.get())
-
-        while True:
-            wait_set = {t for t in (graph_next_task, token_task) if t is not None}
-            if not wait_set:
-                break
-
-            finished, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
-
-            if token_task in finished:
-                token = token_task.result()
-                token_sent = True
-                token_payload = {"message_type": "token", "delta": token}
-                yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
-                if not done:
-                    token_task = asyncio.create_task(token_queue.get())
-                else:
-                    token_task = None
-
-            if graph_next_task in finished:
-                try:
-                    node_chunk = graph_next_task.result()
-                    yield node_chunk
-                    graph_next_task = asyncio.create_task(graph_iter.__anext__())
-                except StopAsyncIteration:
-                    done = True
-                    graph_next_task = None
-                    while True:
-                        try:
-                            token = await asyncio.wait_for(token_queue.get(), timeout=0.05)
-                        except asyncio.TimeoutError:
-                            break
-                        token_payload = {"message_type": "token", "delta": token}
-                        yield f"event: token\ndata: {json.dumps(token_payload, ensure_ascii=False)}\n\n"
-                    if token_task is not None:
-                        token_task.cancel()
-                        token_task = None
-                    break
+        final_message = getattr(_stream_graph_with_tokens, "_last_final_message", "")
 
         resumed_input = req.user_input
         resumed_input_text = json.dumps(resumed_input, ensure_ascii=False) if isinstance(resumed_input, (dict, list)) else str(resumed_input)
-
-        _print_request_token_summary(
-            endpoint="/sessions/{session_id}/hitl/resume",
-            session_id=session_id,
-            app_id=req.app_id,
-            scene_id="default",
-            collector=collector,
-        )
 
         asyncio.create_task(_save_chat_log(
             app_id=req.app_id,
@@ -1167,6 +1140,7 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
         ))
 
         svc.touch_session(session_id, app_id=req.app_id)
+
         done_payload = {
             "ok": True,
             "session_id": session_id,
@@ -1181,3 +1155,88 @@ async def resume_hitl(session_id: str, req: ResumeHITLRequest):
         yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ============================================================
+# ClawHub Skill 导入
+# ============================================================
+
+class ScanSkillsRequest(BaseModel):
+    skills_base_dir: str = Field(default="/app/skills", description="skills 目录路径")
+
+
+@app.post("/admin/claw/scan", summary="扫描可导入的 ClawHub skill 包")
+async def scan_claw_skills(req: ScanSkillsRequest):
+    from app.tools.claw_importer import scan_and_list_skills
+    try:
+        skills_list = scan_and_list_skills(req.skills_base_dir)
+        return {"success": True, "count": len(skills_list), "skills": skills_list}
+    except Exception as e:
+        logger.error(f"扫描 skill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/claw/upload", summary="上传并导入 ClawHub skill 压缩包")
+async def upload_and_import_claw_skill(
+    file: UploadFile = File(..., description="skill 压缩包（.zip / .tar.gz / .tgz）"),
+):
+    """
+    上传 ClawHub skill 压缩包，自动解压、解析、创建 skill。
+    返回 skill_id 和建议的 system_prompt。
+    """
+    from app.tools.claw_importer import extract_skill_archive, import_claw_skill
+
+    filename = file.filename or "skill.zip"
+
+    # 验证文件格式
+    lower = filename.lower()
+    if not any(lower.endswith(ext) for ext in (".zip", ".tar.gz", ".tgz", ".tar")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件格式: {filename}（支持 .zip / .tar.gz / .tgz）"
+        )
+
+    # 保存到临时文件
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # 解压
+        skill_dir = extract_skill_archive(tmp_path, filename)
+
+        # 导入（run_command_tool_id 自动查找）
+        result = import_claw_skill(skill_dir=skill_dir)
+
+        return {"success": True, **result}
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"上传导入 skill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@app.post("/admin/claw/import", summary="导入已存在的 ClawHub skill 目录")
+async def api_import_claw_skill_from_dir(
+    skill_dir: str = Form(..., description="skill 包路径，如 /app/skills/baidu-search-1.1.3"),
+):
+    """导入服务器上已存在的 skill 目录（用于手动放置的 skill 包）。"""
+    from app.tools.claw_importer import import_claw_skill
+    try:
+        result = import_claw_skill(skill_dir=skill_dir)
+        return {"success": True, **result}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"导入 skill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

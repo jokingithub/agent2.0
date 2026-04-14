@@ -82,7 +82,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim
+        BASE_IMAGE: m.daocloud.io/docker.io/library/python:3.10-slim-bookworm
     container_name: mcp-service
     ports:
       - "9001:9001"
@@ -92,12 +92,15 @@ services:
       - MCP_TRANSPORT=${MCP_TRANSPORT:-streamable-http}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=9001
+    env_file:
+      - .env
     command: python mcp-service/mcp-service.py
     depends_on:
       pgsql:
         condition: service_healthy
     volumes:
       - ./:/app
+      - ./skills:/app/skills        # 新增：挂载 skill 包
     restart: unless-stopped
 
   # ocr-service:
@@ -147,10 +150,11 @@ services:
       langfuse:
         condition: service_started
     volumes:
+      - .:/app
+      - ./skills:/app/skills
       - ./sessions:/app/sessions
       - ./fileUpload:/app/fileUpload
       - ./uploads:/app/uploads
-      - .:/app          # 挂载本地代码目录（假设 docker-compose.yml 在项目根目录，且代码在 . 中）
     command: uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 

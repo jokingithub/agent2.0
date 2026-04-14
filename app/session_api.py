@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Query
 
 from dataBase.Service import SessionService, MemoryService, FileService
-from app.Schema import (
+from Schema import (
     CreateSessionRequest,
     UpdateSessionRequest,
     AppendMessageRequest,

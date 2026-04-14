@@ -2,6 +2,8 @@
 import asyncio
 import importlib.util
 import json
+import subprocess
+import os
 from pathlib import Path
 from typing import List, Any
 from langchain_core.tools import Tool, BaseTool, StructuredTool
@@ -68,6 +70,126 @@ def load_skill_as_tool(skill_dir: str) -> BaseTool:
         f"未在技能目录中找到可用工具对象: {skill_dir}；错误: {'; '.join(errors) if errors else '无'}"
     )
 
+# ============ 新增：ClawHub skill 支持 ============
+
+def _create_claw_tool(tool_config: dict) -> StructuredTool:
+    """将 ClawHub skill 包装为 LangChain StructuredTool，通过子进程调用脚本。"""
+    name = tool_config.get("name", "unnamed_claw")
+    description = tool_config.get("description", "")
+
+    config = tool_config.get("config") or {}
+    skill_path = config.get("skill_path", "")
+    script = config.get("script", "")
+    command = config.get("command", "python3")
+    env_vars = config.get("env_vars") or {}
+    timeout = config.get("timeout", 60)
+
+    # 参数定义，复用现有格式
+    arg_defs = config.get("arg_names") if isinstance(config.get("arg_names"), dict) else {}
+    if not arg_defs:
+        raise ValueError(f"Claw工具[{name}]缺少 config.arg_names(字典格式)")
+
+    # 解析脚本完整路径
+    script_full_path = os.path.join(skill_path, script)
+    if not os.path.isfile(script_full_path):
+        raise FileNotFoundError(f"Claw工具[{name}]脚本不存在: {script_full_path}")
+
+    # 动态构建 args_schema（和 MCP 工具一样的逻辑）
+    dynamic_fields: dict[str, tuple[type, Any]] = {}
+    for arg_name, meta in arg_defs.items():
+        meta = meta or {}
+        py_type = _type_name_to_py(meta.get("type", "any"))
+        required = bool(meta.get("required", False))
+        default = ... if required and "default" not in meta else meta.get("default", None)
+        dynamic_fields[arg_name] = (py_type, default)
+
+    class _ClawArgsBase(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+    ClawArgsSchema = create_model(
+        f"ClawArgs_{name}",
+        __base__=_ClawArgsBase,
+        **dynamic_fields,
+    )
+
+    def sync_wrapper(**tool_kwargs: Any) -> str:
+        try:
+            # 复用现有的参数校验逻辑
+            kwargs = _build_mcp_kwargs(tool_kwargs, arg_defs=arg_defs)
+
+            # 序列化为 JSON 字符串作为命令行参数
+            json_arg = json.dumps(kwargs, ensure_ascii=False)
+
+            # 构建子进程环境变量：继承当前环境 + 注入 skill 专属变量
+            proc_env = os.environ.copy()
+            proc_env.update(env_vars)
+
+            # 执行脚本
+            result = subprocess.run(
+                [command, script, json_arg],   # 改这里
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=skill_path,
+                env=proc_env,
+            )
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                stdout = result.stdout.strip()
+                error_msg = stderr or stdout or f"exit code {result.returncode}"
+                logger.error(f"Claw工具[{name}]执行失败: {error_msg}")
+                return f"工具执行失败: {error_msg}"
+
+            output = result.stdout.strip()
+            if not output:
+                return "工具执行完成，无输出"
+
+            # 尝试提取最后的 JSON 块作为结果
+            # （因为很多 claw skill 会先 print 调试信息，最后 print JSON 结果）
+            return _extract_result(output)
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Claw工具[{name}]执行超时({timeout}s)")
+            return f"工具执行超时（{timeout}秒）"
+        except Exception as e:
+            logger.error(f"Claw工具[{name}]调用失败: {e}")
+            return f"工具调用失败: {e}"
+
+    return StructuredTool.from_function(
+        func=sync_wrapper,
+        name=name,
+        description=description,
+        args_schema=ClawArgsSchema,
+        infer_schema=False,
+    )
+
+
+def _extract_result(output: str) -> str:
+    """从 stdout 输出中提取结果。
+
+    ClawHub skill 的 stdout 可能混合调试信息和 JSON 结果，
+    例如 baidu-search 会先打印 "success parse request body: ..."，
+    然后打印 JSON 数组。
+
+    策略：从后往前找第一个完整的 JSON 块（数组或对象）。
+    如果找不到，返回完整输出。
+    """
+    lines = output.strip().split('\n')
+
+    # 从后往前尝试拼接行，找到可解析的 JSON
+    for i in range(len(lines)):
+        candidate = '\n'.join(lines[i:]).strip()
+        if candidate and candidate[0] in ('{', '['):
+            try:
+                parsed = json.loads(candidate)
+                # 解析成功，返回格式化的 JSON
+                return json.dumps(parsed, ensure_ascii=False, indent=2)
+            except json.JSONDecodeError:
+                continue
+
+    # 找不到 JSON，返回原始输出
+    return output
 
 def _is_tool_exposed_to_agent(tool_config: dict, sub_agent_id: str | None) -> bool:
     """判断工具是否允许暴露给指定子 Agent。
@@ -298,8 +420,8 @@ def load_tool_from_config(tool_id: str, sub_agent_id: str | None = None) -> Tool
 
     elif tool_type == "mcp":
         return _create_mcp_tool(tool_config)
-    elif tool_type == "http":
-        return _create_http_tool(tool_config)
+    elif tool_type == "claw":
+        return _create_claw_tool(tool_config)
     else:
         logger.warning(f"未知工具类型 '{tool_type}'，工具: {tool_config.get('name')}")
         return None

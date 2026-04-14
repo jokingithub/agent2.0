@@ -14,30 +14,30 @@ class GatewayConfigStore:
 
     def get_backend_base_url(self) -> str:
         """
-        从 gateway_env 动态读取后端地址。
-        兼容两种方式：
-        1) whitelist[0] 直接放完整地址，如 http://127.0.0.1:8000
-        2) 使用 port 字段，host 默认 127.0.0.1
+        后端地址解析优先级：
+        1) BACKEND_BASE_URL 环境变量（部署首选）
+        2) gateway_env.inner_base_url（数据库配置）
+        3) BACKEND_HOST + BACKEND_PORT 兜底
         """
         env = self.gateway_env_service.get_current() or {}
-        whitelist = env.get("whitelist") or []
-        if whitelist:
-            first = str(whitelist[0]).strip().rstrip("/")
-            if first.startswith("http://") or first.startswith("https://"):
-                return first
 
-        env_backend = os.getenv("BACKEND_BASE_URL", "").strip().rstrip("/")
-        if env_backend.startswith("http://") or env_backend.startswith("https://"):
+        # 1) 环境变量优先
+        env_backend = str(os.getenv("BACKEND_BASE_URL", "")).strip().rstrip("/")
+        if env_backend.startswith(("http://", "https://")):
             return env_backend
 
-        default_port = int(os.getenv("BACKEND_PORT", "8000"))
-        port = int(env.get("port", default_port))
+        # 2) DB 配置（注意：inner_base_url 才是后端地址，whitelist 不是）
+        inner_base_url = str(env.get("inner_base_url", "")).strip().rstrip("/")
+        if inner_base_url.startswith(("http://", "https://")):
+            return inner_base_url
 
+        # 3) 兜底：按运行环境拼接
         in_docker = os.path.exists("/.dockerenv")
-        if in_docker:
-            host = os.getenv("BACKEND_HOST", "main-app")
-        else:
-            host = os.getenv("BACKEND_HOST", "127.0.0.1")
+        default_host = "main-app" if in_docker else "127.0.0.1"
+        host = str(os.getenv("BACKEND_HOST", default_host)).strip() or default_host
+
+        # 这里不能用 gateway_env.port（那是网关端口，通常是 9000）
+        port = int(os.getenv("BACKEND_PORT", "8000"))
 
         return f"http://{host}:{port}"
 

@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from .database import Database
 from .CRUD import CRUD
-from .Schema import FileModel, MemoryModel, FileTypeModel, SessionModel
+from Schema import FileModel, MemoryModel, FileTypeModel, SessionModel
 
 
 

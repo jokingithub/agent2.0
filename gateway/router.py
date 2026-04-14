@@ -5,7 +5,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, Query
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
-from app.Schema import ChatRequest
+from Schema.request import ChatRequest
 from gateway.auth import require_token
 from gateway.schemas import (
     ToolInvokeRequest,
@@ -130,22 +130,29 @@ async def gateway_chat_stream(
     target_url = f"{backend}/chat/stream"
 
     async def stream_gen():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", target_url, json=req.model_dump()) as resp:
-                if resp.status_code >= 400:
-                    body = await resp.aread()
-                    payload = {
-                        "status": resp.status_code,
-                        "detail": body.decode("utf-8", errors="ignore"),
-                    }
-                    yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    return
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", target_url, json=req.model_dump()) as resp:
+                    if resp.status_code >= 400:
+                        body = await resp.aread()
+                        payload = {
+                            "status": resp.status_code,
+                            "detail": body.decode("utf-8", errors="ignore"),
+                        }
+                        yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        return
 
-                async for chunk in resp.aiter_text():
-                    yield chunk
+                    async for chunk in resp.aiter_text():
+                        yield chunk
+        except httpx.RequestError as e:
+            payload = {"status": 503, "detail": f"Backend service unreachable: {str(e)}"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(stream_gen(), media_type="text/event-stream")
-
+    return StreamingResponse(
+        stream_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 @protected_router.get("/sessions/{session_id}/hitl/status")
 async def gateway_hitl_status(
@@ -175,21 +182,29 @@ async def gateway_hitl_resume(
     body = await request.json()
 
     async def stream_gen():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", target_url, json=body) as resp:
-                if resp.status_code >= 400:
-                    raw = await resp.aread()
-                    payload = {
-                        "status": resp.status_code,
-                        "detail": raw.decode("utf-8", errors="ignore"),
-                    }
-                    yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    return
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", target_url, json=body) as resp:
+                    if resp.status_code >= 400:
+                        raw = await resp.aread()
+                        payload = {
+                            "status": resp.status_code,
+                            "detail": raw.decode("utf-8", errors="ignore"),
+                        }
+                        yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        return
 
-                async for chunk in resp.aiter_text():
-                    yield chunk
+                    async for chunk in resp.aiter_text():
+                        yield chunk
+        except httpx.RequestError as e:
+            payload = {"status": 503, "detail": f"Backend service unreachable: {str(e)}"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(stream_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 @protected_router.delete("/sessions/{session_id}")
 async def gateway_delete_session(
