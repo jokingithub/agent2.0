@@ -459,7 +459,13 @@ class SessionService:
         }
 
     def build_resume_graph_inputs(self, session_id: str, app_id: str) -> Optional[Dict[str, Any]]:
-        """从已恢复的 pending_data 构建图继续执行所需 inputs。"""
+        """从已恢复的 pending_data 构建图继续执行所需 inputs。
+
+        核心改进：
+        1. 恢复挂起前的 agent_scratchpad 和 supervisor_scratchpad
+        2. 将用户输入作为 ToolMessage 注入到对应的 scratchpad 中
+        3. 设置正确的 next 路由，让图从 subagent/supervisor 工具调用处继续
+        """
         session_doc = self.get_session_metadata(session_id, app_id=app_id)
         if not session_doc:
             return None
@@ -472,38 +478,124 @@ class SessionService:
         user_input = pending_data.get("user_input")
         question = pending_data.get("question") or ""
         current_agent = context.get("current_agent") or ""
+        tool_call_id = context.get("tool_call_id") or ""
 
-        # 组装一条用户消息继续驱动图执行
+        # 格式化用户输入文本
         if isinstance(user_input, (dict, list)):
             user_input_text = json.dumps(user_input, ensure_ascii=False)
         else:
-            user_input_text = str(user_input)
+            user_input_text = str(user_input or "")
 
-        followup_message = user_input_text.strip() if user_input_text else ""
-        if question and followup_message:
-            followup_message = f"【HITL用户输入】问题：{question}\n用户输入：{followup_message}"
-        elif not followup_message:
-            followup_message = "【HITL用户输入】（空输入）"
+        # 构造 HITL 响应内容（替换原来的 __HITL__ ToolMessage）
+        hitl_response_content = user_input_text.strip() if user_input_text else "(空输入)"
+        if question:
+            hitl_response_content = f"用户回答了问题「{question}」：{hitl_response_content}"
+
+        # 反序列化保存的 scratchpad
+        agent_scratchpad = self._deserialize_messages(context.get("agent_scratchpad") or [])
+        supervisor_scratchpad = self._deserialize_messages(context.get("supervisor_scratchpad") or [])
 
         session_files = self.get_session_files_content(session_id, app_id=app_id)
+        session_file_refs = [
+            {
+                "file_id": f.get("file_id") or "",
+                "file_name": f.get("file_name") or "",
+                "main_info": f.get("main_info") or {},
+            }
+            for f in (session_files or [])
+        ]
 
-        return {
-            "session_id": session_id,
-            "app_id": app_id,
-            "scene_id": context.get("scene_id") or "default",
-            "selected_role_id": context.get("selected_role_id") or "",
-            "current_agent": current_agent,
-            "next": "RUN_AGENT" if current_agent else "",
-            "messages": [("user", followup_message)],
-            "session_files": [
-                {
-                    "file_id": f.get("file_id") or "",
-                    "file_name": f.get("file_name") or "",
-                    "main_info": f.get("main_info") or {},
-                }
-                for f in (session_files or [])
-            ],
-        }
+        # 判断 HITL 发生在 subagent 还是 supervisor
+        if current_agent and agent_scratchpad:
+            # ── HITL 发生在 subagent 的工具调用中 ──
+            # 将用户输入作为 ToolMessage 注入 agent_scratchpad，替换 __HITL__ 的结果
+            from langchain_core.messages import ToolMessage
+            hitl_tool_msg = ToolMessage(
+                content=hitl_response_content,
+                tool_call_id=tool_call_id or "hitl_resume",
+            )
+            # 移除 scratchpad 末尾的 __HITL__ ToolMessage（如果有）
+            cleaned_pad = self._remove_trailing_hitl_messages(agent_scratchpad)
+            cleaned_pad.append(hitl_tool_msg)
+
+            return {
+                "session_id": session_id,
+                "app_id": app_id,
+                "scene_id": context.get("scene_id") or "default",
+                "selected_role_id": context.get("selected_role_id") or "",
+                "current_agent": current_agent,
+                "next": "RUN_AGENT",
+                "messages": [],
+                "agent_scratchpad": cleaned_pad,
+                "supervisor_scratchpad": supervisor_scratchpad,
+                "session_files": session_file_refs,
+            }
+
+        elif supervisor_scratchpad:
+            # ── HITL 发生在 Supervisor 直接工具调用中 ──
+            from langchain_core.messages import ToolMessage
+            hitl_tool_msg = ToolMessage(
+                content=hitl_response_content,
+                tool_call_id=tool_call_id or "hitl_resume",
+            )
+            cleaned_pad = self._remove_trailing_hitl_messages(supervisor_scratchpad)
+            cleaned_pad.append(hitl_tool_msg)
+
+            return {
+                "session_id": session_id,
+                "app_id": app_id,
+                "scene_id": context.get("scene_id") or "default",
+                "selected_role_id": context.get("selected_role_id") or "",
+                "current_agent": "",
+                "next": "",  # 从 Supervisor 重新开始，但带上完整上下文
+                "messages": [],
+                "agent_scratchpad": [],
+                "supervisor_scratchpad": cleaned_pad,
+                "session_files": session_file_refs,
+            }
+
+        else:
+            # ── 兜底：无法恢复上下文，走旧逻辑 ──
+            followup_message = hitl_response_content
+            if question:
+                followup_message = f"【HITL用户输入】问题：{question}\n用户输入：{user_input_text.strip()}"
+
+            return {
+                "session_id": session_id,
+                "app_id": app_id,
+                "scene_id": context.get("scene_id") or "default",
+                "selected_role_id": context.get("selected_role_id") or "",
+                "current_agent": current_agent,
+                "next": "RUN_AGENT" if current_agent else "",
+                "messages": [("user", followup_message)],
+                "session_files": session_file_refs,
+            }
+
+    @staticmethod
+    def _deserialize_messages(data: list) -> list:
+        """将序列化的消息字典列表还原为 BaseMessage 列表。"""
+        if not data:
+            return []
+        try:
+            from langchain_core.messages import messages_from_dict
+            return list(messages_from_dict(data))
+        except Exception:
+            return []
+
+    @staticmethod
+    def _remove_trailing_hitl_messages(messages: list) -> list:
+        """移除消息列表末尾的 __HITL__ ToolMessage。"""
+        from langchain_core.messages import ToolMessage
+        result = list(messages)
+        while result:
+            last = result[-1]
+            if isinstance(last, ToolMessage):
+                content = last.content if isinstance(last.content, str) else str(last.content)
+                if content.startswith("__HITL__"):
+                    result.pop()
+                    continue
+            break
+        return result
 
     # ------------------------
     # 文件关联

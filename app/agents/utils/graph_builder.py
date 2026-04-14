@@ -103,6 +103,18 @@ def route_after_supervisor_tool(state: AgentState) -> str:
     return "BACK_TO_SUPERVISOR"
 
 
+def _serialize_messages(msgs: list) -> list:
+    """将 BaseMessage 列表序列化为可 JSON 存储的字典列表。"""
+    from langchain_core.messages import messages_to_dict
+    if not msgs:
+        return []
+    try:
+        return messages_to_dict(msgs)
+    except Exception as e:
+        logger.warning(f"序列化消息失败: {e}")
+        return []
+
+
 def suspend_handler(state: AgentState):
     session_id = (state.get("session_id") or "").strip()
     app_id = (state.get("app_id") or "").strip()
@@ -124,8 +136,13 @@ def suspend_handler(state: AgentState):
             context={
                 "session_files": state.get("session_files") or [],
                 "messages": [],
-                "agent_scratchpad": [],
-                "supervisor_scratchpad": [],
+                # ★ 保存完整的私有上下文和 Supervisor 上下文
+                "agent_scratchpad": _serialize_messages(
+                    list(state.get("agent_scratchpad") or [])
+                ),
+                "supervisor_scratchpad": _serialize_messages(
+                    list(state.get("supervisor_scratchpad") or [])
+                ),
                 "tool_call_id": pending.get("tool_call_id", ""),
                 "current_agent": pending.get("current_agent", "") or state.get("current_agent", ""),
                 "scene_id": pending.get("scene_id", "") or state.get("scene_id", ""),
@@ -141,13 +158,39 @@ def suspend_handler(state: AgentState):
 def create_graph():
     workflow = StateGraph(AgentState)
 
-    # ── 节点 ──
+    # ── 入口路由节点 ──
+    def entry_router(state: AgentState):
+        """入口路由：如果是 HITL 恢复且有 current_agent + agent_scratchpad，
+        直接跳到 AgentRunner；否则走 Supervisor。"""
+        nxt = (state.get("next") or "").strip()
+        current_agent = (state.get("current_agent") or "").strip()
+        agent_pad = state.get("agent_scratchpad") or []
+
+        if nxt == "RUN_AGENT" and current_agent and agent_pad:
+            # HITL 恢复场景：subagent 有保存的上下文，直接继续执行
+            return "RUN_AGENT"
+        # 其他情况都走 Supervisor
+        return "SUPERVISOR"
+
+    workflow.add_node("EntryRouter", lambda state: {})  # 空节点，仅做路由
     workflow.add_node("Supervisor", supervisor_node)
     workflow.add_node("GenericAgentRunner", run_agent)
     workflow.add_node("GenericToolRunner", run_tools)
     workflow.add_node("SupervisorToolRunner", run_supervisor_tools)
     workflow.add_node("InjectSubAgentResult", inject_sub_agent_result)
     workflow.add_node("SuspendHandler", suspend_handler)
+
+    # ── 入口 ──
+    workflow.set_entry_point("EntryRouter")
+
+    workflow.add_conditional_edges(
+        "EntryRouter",
+        entry_router,
+        {
+            "SUPERVISOR": "Supervisor",
+            "RUN_AGENT": "GenericAgentRunner",
+        },
+    )
 
     # ── Supervisor 出口 ──
     workflow.add_conditional_edges(
@@ -196,7 +239,6 @@ def create_graph():
     # ── 挂起 → 结束 ──
     workflow.add_edge("SuspendHandler", END)
 
-    workflow.set_entry_point("Supervisor")
     compiled = workflow.compile()
-    logger.info("graph: 编译完成（Supervisor bind_tools 模式，无 FINISH 工具）")
+    logger.info("graph: 编译完成（Supervisor bind_tools 模式，支持 HITL 上下文恢复）")
     return compiled
