@@ -6,3 +6,4 @@ from . import web_search
 from . import read_file
 from . import ask_human_input
 from . import cli
+from . import company_info
